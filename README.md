@@ -18,7 +18,7 @@ Built with `Tauri 2 + React + TypeScript + Web Audio API`.
 
 The app accepts these extensions on import:
 
-- `.mp3`, `.mpga`, `.wav`, `.ogg`, `.m4a`, `.aac`, `.webm`, `.flac`, `.wma`, `.opus`
+- `.mp3`, `.mpeg`, `.mpga`, `.wav`, `.ogg`, `.m4a`, `.aac`, `.webm`, `.flac`, `.wma`, `.opus`
 
 Maximum file size: `50MB` per file.
 
@@ -43,6 +43,20 @@ npm run tauri dev
 
 ```bash
 npm run tauri build
+```
+
+## GitHub Releases (Windows/macOS/Linux)
+
+This repo includes a GitHub Actions workflow at `.github/workflows/tauri-build.yml`.
+
+- Trigger: push a tag like `v1.0.0`
+- Result: draft GitHub Release with desktop artifacts for Windows, macOS, and Linux
+
+Example:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ## License
