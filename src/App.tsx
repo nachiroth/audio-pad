@@ -103,6 +103,7 @@ function App() {
 
       const validExtensions = [
         ".mp3",
+        ".mpeg",
         ".mpga",
         ".wav",
         ".ogg",

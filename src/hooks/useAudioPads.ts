@@ -262,7 +262,8 @@ export function useAudioPads() {
           let errorMsg = "Failed to load audio file.";
           const code = newAudio.error?.code;
           if (code === 4)
-            errorMsg = "Format not supported by this browser/system.";
+            errorMsg =
+              "This audio file could not be decoded by the system audio backend.";
           else if (code === 1) errorMsg = "Loading aborted.";
           else if (code === 2) errorMsg = "Network error.";
           else if (code === 3) errorMsg = "File is corrupted or incomplete.";
@@ -521,7 +522,7 @@ export function useAudioPads() {
                   ...p,
                   status: "error",
                   errorMessage:
-                    "Failed to load audio file. Format may not be supported.",
+                    "Failed to load audio file. The system could not decode this audio stream.",
                 }
               : p,
           ),
@@ -533,7 +534,7 @@ export function useAudioPads() {
 
   // Remove pad
   const removePad = useCallback(
-    async (padId: string) => {
+    (padId: string) => {
       const audio = audioElementsRef.current.get(padId);
       const gainNode = gainNodesRef.current.get(padId);
       if (audio && gainNode) {
@@ -550,21 +551,24 @@ export function useAudioPads() {
       }
 
       const pad = pads.find((p) => p.id === padId);
-      if (pad?.localFile) {
-        try {
-          await deleteAudioFile(padId);
-        } catch (e) {
-          console.error("Failed to delete audio file from IndexedDB:", e);
-        }
-      }
-      if (pad?.audioUrl) {
-        await revokeStoredAudioURL(pad.audioUrl).catch((e) => {
-          console.error("Failed to revoke audio URL:", e);
-        });
-      }
-
       if (activePadId === padId) setActivePadId(null);
       setPads((prev) => prev.filter((p) => p.id !== padId));
+
+      // Cleanup storage/URL in background so UI removal is immediate.
+      void (async () => {
+        if (pad?.localFile) {
+          try {
+            await deleteAudioFile(padId);
+          } catch (e) {
+            console.error("Failed to delete audio file from IndexedDB:", e);
+          }
+        }
+        if (pad?.audioUrl) {
+          await revokeStoredAudioURL(pad.audioUrl).catch((e) => {
+            console.error("Failed to revoke audio URL:", e);
+          });
+        }
+      })();
     },
     [activePadId, pads],
   );
