@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Audio Pad",
+  "version": "1.0.0",
+  "identifier": "com.audiopad.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Audio Pad",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost data: blob:; media-src 'self' asset: https://asset.localhost blob: data:; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline'; font-src 'self' asset: https://asset.localhost; worker-src 'self' blob:;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "category": "Music",
+    "shortDescription": "Offline audio soundboard for live performances",
+    "longDescription": "Audio Pad is a professional offline-first soundboard for live events, theater, worship services, and streaming. Load and manage audio cues with fade controls, per-pad volume, drag-and-drop ordering, and local persistence."
+  }
+}

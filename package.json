@@ -1,0 +1,33 @@
+{
+  "name": "audio-pad",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "clean": "rm -rf dist src-tauri/target",
+    "clean:full": "rm -rf dist src-tauri/target node_modules",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@tauri-apps/api": "^2",
+    "framer-motion": "^12.34.3",
+    "i18next": "^25.8.13",
+    "i18next-browser-languagedetector": "^8.2.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-i18next": "^16.5.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  }
+}
