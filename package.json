@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "clean": "rm -rf dist src-tauri/target",
+    "clean": "rm -rf src-tauri/target",
+    "clean:dist": "rm -rf dist",
     "clean:full": "rm -rf dist src-tauri/target node_modules",
     "preview": "vite preview",
     "tauri": "tauri"
