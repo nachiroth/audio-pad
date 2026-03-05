@@ -120,6 +120,8 @@ export function useAudioPads() {
 
   const [isMuted, setIsMuted] = useState(false);
   const [activePadId, setActivePadId] = useState<string | null>(null);
+  const [metadataQueuePending, setMetadataQueuePending] = useState(0);
+  const [metadataQueueProcessing, setMetadataQueueProcessing] = useState(false);
 
   // Initialize pads from localStorage and restore IndexedDB blob URLs
   useEffect(() => {
@@ -150,6 +152,22 @@ export function useAudioPads() {
                 status: "error" as const,
                 errorMessage: MISSING_STORED_FILE_ERROR,
               };
+            }
+            if (
+              pad.id &&
+              (!pad.audioUrl ||
+                (typeof pad.audioUrl === "string" &&
+                  pad.audioUrl.startsWith("blob:")))
+            ) {
+              const recoveredUrl = await createAudioObjectURL(pad.id);
+              if (recoveredUrl) {
+                return {
+                  ...basePad,
+                  audioUrl: recoveredUrl,
+                  localFile: true,
+                  downloaded: true,
+                };
+              }
             }
             if (
               typeof pad.audioUrl === "string" &&
@@ -189,6 +207,17 @@ export function useAudioPads() {
   const cleanupScheduledRef = useRef(false);
   const playRequestRef = useRef(0);
   const decodeRetryRef = useRef<Set<string>>(new Set());
+  const normalizationInProgressRef = useRef<Set<string>>(new Set());
+  const normalizationTimersRef = useRef<Map<string, number>>(new Map());
+  const metadataQueueRef = useRef<Array<{ padId: string; audioUrl: string }>>(
+    [],
+  );
+  const metadataWorkerRef = useRef(false);
+
+  const syncMetadataQueueState = useCallback(() => {
+    setMetadataQueuePending(metadataQueueRef.current.length);
+    setMetadataQueueProcessing(metadataWorkerRef.current);
+  }, []);
 
   const clearProgressInterval = useCallback(() => {
     if (progressIntervalRef.current) {
@@ -235,6 +264,86 @@ export function useAudioPads() {
     probeAudio.src = "";
     preloadAudioElementsRef.current.delete(padId);
   }, []);
+
+  const processMetadataQueue = useCallback(async () => {
+    if (metadataWorkerRef.current) return;
+    metadataWorkerRef.current = true;
+    syncMetadataQueueState();
+
+    while (metadataQueueRef.current.length > 0) {
+      const next = metadataQueueRef.current.shift();
+      syncMetadataQueueState();
+      if (!next) continue;
+      const { padId, audioUrl } = next;
+      if (deletedPadIdsRef.current.has(padId)) continue;
+
+      await new Promise<void>((resolve) => {
+        const probe = new Audio(audioUrl);
+        probe.crossOrigin = "anonymous";
+        probe.preload = "metadata";
+        preloadAudioElementsRef.current.set(padId, probe);
+
+        const finish = () => {
+          cleanupPreloadAudio(padId);
+          resolve();
+        };
+
+        const fallbackTimer = window.setTimeout(finish, 7000);
+
+        probe.onloadedmetadata = () => {
+          if (!deletedPadIdsRef.current.has(padId)) {
+            setAllPads((prev) =>
+              prev.map((p) =>
+                p.id === padId
+                  ? {
+                      ...p,
+                      status: "ready",
+                      duration: probe.duration || p.duration || 0,
+                      currentTime: 0,
+                    }
+                  : p,
+              ),
+            );
+            updatePadProgress(padId, 0, probe.duration || 0);
+          }
+          clearTimeout(fallbackTimer);
+          finish();
+        };
+
+        probe.onerror = () => {
+          if (!deletedPadIdsRef.current.has(padId)) {
+            setAllPads((prev) =>
+              prev.map((p) =>
+                p.id === padId
+                  ? {
+                      ...p,
+                      status: "error",
+                      errorMessage: GENERIC_AUDIO_LOAD_ERROR,
+                    }
+                  : p,
+              ),
+            );
+          }
+          clearTimeout(fallbackTimer);
+          finish();
+        };
+      });
+
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    }
+
+    metadataWorkerRef.current = false;
+    syncMetadataQueueState();
+  }, [cleanupPreloadAudio, updatePadProgress, syncMetadataQueueState]);
+
+  const enqueueMetadataProbe = useCallback(
+    (padId: string, audioUrl: string) => {
+      metadataQueueRef.current.push({ padId, audioUrl });
+      syncMetadataQueueState();
+      void processMetadataQueue();
+    },
+    [processMetadataQueue, syncMetadataQueueState],
+  );
 
   const runCleanupQueue = useCallback(async () => {
     if (cleanupScheduledRef.current) return;
@@ -367,6 +476,70 @@ export function useAudioPads() {
     [computeNormalizationGainFromBuffer],
   );
 
+  const hasAnyPlayingAudio = useCallback(() => {
+    for (const [, audio] of audioElementsRef.current.entries()) {
+      if (!audio.paused && !audio.ended) return true;
+    }
+    return false;
+  }, []);
+
+  const scheduleNormalization = useCallback(
+    (padId: string, audioUrl: string) => {
+      if (normalizationInProgressRef.current.has(padId)) return;
+      if (normalizationTimersRef.current.has(padId)) return;
+
+      const run = () => {
+        normalizationTimersRef.current.delete(padId);
+        const latestPad = allPadsRef.current.find((p) => p.id === padId);
+        if (
+          !latestPad ||
+          latestPad.normalized ||
+          deletedPadIdsRef.current.has(padId)
+        ) {
+          return;
+        }
+
+        // Avoid heavy decode work during playback to prevent stutter.
+        if (hasAnyPlayingAudio()) {
+          const retryId = window.setTimeout(() => {
+            scheduleNormalization(padId, audioUrl);
+          }, 1200);
+          normalizationTimersRef.current.set(padId, retryId);
+          return;
+        }
+
+        normalizationInProgressRef.current.add(padId);
+        void normalizeVolumeFromUrl(audioUrl)
+          .then((gain) => {
+            if (deletedPadIdsRef.current.has(padId)) return;
+            setAllPads((prev) =>
+              prev.map((p) =>
+                p.id === padId
+                  ? { ...p, normalized: true, normalizationGain: gain }
+                  : p,
+              ),
+            );
+          })
+          .catch((error) => {
+            console.error("Background normalization failed:", error);
+          })
+          .finally(() => {
+            normalizationInProgressRef.current.delete(padId);
+          });
+      };
+
+      if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+        (
+          window as Window & { requestIdleCallback: (cb: () => void) => number }
+        ).requestIdleCallback(run);
+      } else {
+        const timerId = setTimeout(run, 220);
+        normalizationTimersRef.current.set(padId, timerId);
+      }
+    },
+    [hasAnyPlayingAudio, normalizeVolumeFromUrl],
+  );
+
   const fadeIn = useCallback(
     async (
       padId: string,
@@ -411,8 +584,37 @@ export function useAudioPads() {
     async (padId: string) => {
       const requestId = ++playRequestRef.current;
       if (deletedPadIdsRef.current.has(padId)) return;
-      const pad = allPadsRef.current.find((p) => p.id === padId);
+      let pad = allPadsRef.current.find((p) => p.id === padId);
       if (!pad || pad.status === "error" || pad.status === "loading") return;
+      if (!pad.audioUrl) {
+        if (pad.id) {
+          const recoveredUrl = await createAudioObjectURL(pad.id);
+          if (recoveredUrl) {
+            setAllPads((prev) =>
+              prev.map((p) =>
+                p.id === padId
+                  ? {
+                      ...p,
+                      audioUrl: recoveredUrl,
+                      localFile: true,
+                      downloaded: true,
+                      status: "ready",
+                      errorMessage: undefined,
+                    }
+                  : p,
+              ),
+            );
+            pad = {
+              ...pad,
+              audioUrl: recoveredUrl,
+              localFile: true,
+              downloaded: true,
+              status: "ready",
+              errorMessage: undefined,
+            };
+          }
+        }
+      }
       if (!pad.audioUrl) {
         setAllPads((prev) =>
           prev.map((p) =>
@@ -467,6 +669,85 @@ export function useAudioPads() {
 
       const audio = audioElementsRef.current.get(padId);
       const gainNode = gainNodesRef.current.get(padId);
+      const startProgressTracking = (audioEl: HTMLAudioElement) => {
+        clearProgressInterval();
+        progressIntervalRef.current = window.setInterval(() => {
+          updatePadProgress(padId, audioEl.currentTime, audioEl.duration);
+        }, 250);
+      };
+      const handlePlayStartFailure = async (
+        audioEl: HTMLAudioElement,
+        error: unknown,
+      ) => {
+        const code = audioEl.error?.code;
+        const domError = error as DOMException | undefined;
+        const isDecodeLikeFailure =
+          code === 4 || domError?.name === "NotSupportedError";
+        const alreadyRetried = decodeRetryRef.current.has(padId);
+
+        audioEl.pause();
+        clearProgressInterval();
+        setActivePadId((current) => (current === padId ? null : current));
+
+        if (isDecodeLikeFailure && !alreadyRetried) {
+          decodeRetryRef.current.add(padId);
+          const brokenAudio = audioElementsRef.current.get(padId);
+          if (brokenAudio) {
+            brokenAudio.onloadeddata = null;
+            brokenAudio.onerror = null;
+            brokenAudio.onended = null;
+            brokenAudio.ontimeupdate = null;
+            brokenAudio.pause();
+            brokenAudio.src = "";
+          }
+          audioElementsRef.current.delete(padId);
+          gainNodesRef.current.delete(padId);
+
+          if (pad?.localFile) {
+            const refreshedUrl = await createAudioObjectURL(padId);
+            if (refreshedUrl) {
+              setAllPads((prev) =>
+                prev.map((p) =>
+                  p.id === padId
+                    ? {
+                        ...p,
+                        audioUrl: refreshedUrl,
+                        status: "ready",
+                        errorMessage: undefined,
+                      }
+                    : p,
+                ),
+              );
+            }
+          }
+          window.setTimeout(() => {
+            void playPad(padId);
+          }, 40);
+          return;
+        }
+
+        let errorMsg = "Failed to start playback.";
+        if (code === 4 || domError?.name === "NotSupportedError") {
+          errorMsg = GENERIC_AUDIO_LOAD_ERROR;
+        } else if (code === 3) {
+          errorMsg = "File is corrupted or incomplete.";
+        }
+        setAllPads((prev) =>
+          prev.map((p) =>
+            p.id === padId
+              ? {
+                  ...p,
+                  status:
+                    errorMsg === GENERIC_AUDIO_LOAD_ERROR ? "error" : "ready",
+                  errorMessage:
+                    errorMsg === GENERIC_AUDIO_LOAD_ERROR
+                      ? errorMsg
+                      : undefined,
+                }
+              : p,
+          ),
+        );
+      };
 
       if (!audio || !gainNode) {
         const { audio: newAudio } = createAudioElement(padId, pad.audioUrl);
@@ -474,19 +755,25 @@ export function useAudioPads() {
         newAudio.onloadeddata = async () => {
           if (requestId !== playRequestRef.current) return;
           if (deletedPadIdsRef.current.has(padId)) return;
-          setActivePadId(padId);
-          setAllPads((prev) =>
-            prev.map((p) => (p.id === padId ? { ...p, status: "playing" } : p)),
-          );
-
-          clearProgressInterval();
-          progressIntervalRef.current = window.setInterval(() => {
-            updatePadProgress(padId, newAudio.currentTime, newAudio.duration);
-          }, 250);
-
-          await newAudio.play().catch(console.error);
+          if (newAudio.ended) newAudio.currentTime = 0;
+          try {
+            await newAudio.play();
+          } catch (error) {
+            console.error("Failed to play audio:", error);
+            await handlePlayStartFailure(newAudio, error);
+            return;
+          }
           if (requestId !== playRequestRef.current) return;
           decodeRetryRef.current.delete(padId);
+          setActivePadId(padId);
+          setAllPads((prev) =>
+            prev.map((p) =>
+              p.id === padId
+                ? { ...p, status: "playing", errorMessage: undefined }
+                : p,
+            ),
+          );
+          startProgressTracking(newAudio);
           const targetVolume = Math.min(
             1,
             playbackVolume * (settings.normalizeVolume ? normalizationGain : 1),
@@ -494,37 +781,7 @@ export function useAudioPads() {
           await fadeIn(padId, targetVolume, settings.fadeDuration);
 
           if (settings.normalizeVolume && !pad.normalized) {
-            void normalizeVolumeFromUrl(pad.audioUrl)
-              .then((gain) => {
-                if (deletedPadIdsRef.current.has(padId)) return;
-                normalizationGain = gain;
-                setAllPads((prev) =>
-                  prev.map((p) =>
-                    p.id === padId
-                      ? { ...p, normalized: true, normalizationGain: gain }
-                      : p,
-                  ),
-                );
-                const liveGainNode = gainNodesRef.current.get(padId);
-                const livePad = allPadsRef.current.find((p) => p.id === padId);
-                if (!liveGainNode || !livePad || livePad.status !== "playing")
-                  return;
-                const nextGain = Math.min(
-                  1,
-                  (livePad.volume ?? settings.defaultVolume) * gain,
-                );
-                const ctx = getAudioContext();
-                const now = ctx.currentTime;
-                liveGainNode.gain.cancelScheduledValues(now);
-                liveGainNode.gain.setValueAtTime(liveGainNode.gain.value, now);
-                liveGainNode.gain.linearRampToValueAtTime(
-                  isMuted ? 0 : nextGain,
-                  now + 0.14,
-                );
-              })
-              .catch((error) => {
-                console.error("Background normalization failed:", error);
-              });
+            scheduleNormalization(padId, pad.audioUrl);
           }
         };
 
@@ -541,76 +798,10 @@ export function useAudioPads() {
 
         newAudio.onerror = () => {
           if (deletedPadIdsRef.current.has(padId)) return;
-          const code = newAudio.error?.code;
-          const alreadyRetried = decodeRetryRef.current.has(padId);
-
-          if (code === 4 && !alreadyRetried) {
-            decodeRetryRef.current.add(padId);
-            const brokenAudio = audioElementsRef.current.get(padId);
-            if (brokenAudio) {
-              brokenAudio.onloadeddata = null;
-              brokenAudio.onerror = null;
-              brokenAudio.onended = null;
-              brokenAudio.ontimeupdate = null;
-              brokenAudio.pause();
-              brokenAudio.src = "";
-            }
-            audioElementsRef.current.delete(padId);
-            gainNodesRef.current.delete(padId);
-
-            void (async () => {
-              if (pad.localFile) {
-                const refreshedUrl = await createAudioObjectURL(padId);
-                if (refreshedUrl) {
-                  setAllPads((prev) =>
-                    prev.map((p) =>
-                      p.id === padId
-                        ? {
-                            ...p,
-                            audioUrl: refreshedUrl,
-                            status: "ready",
-                            errorMessage: undefined,
-                          }
-                        : p,
-                    ),
-                  );
-                }
-              }
-
-              // Retry once in next tick; if it fails again, user gets real error.
-              window.setTimeout(() => {
-                void playPad(padId);
-              }, 40);
-            })();
-            return;
-          }
-
-          let errorMsg = "Failed to load audio file.";
-          if (code === 4) errorMsg = GENERIC_AUDIO_LOAD_ERROR;
-          else if (code === 1) errorMsg = "Loading aborted.";
-          else if (code === 2) errorMsg = "Network error.";
-          else if (code === 3) errorMsg = "File is corrupted or incomplete.";
-
-          setAllPads((prev) =>
-            prev.map((p) =>
-              p.id === padId
-                ? { ...p, status: "error", errorMessage: errorMsg }
-                : p,
-            ),
-          );
+          void handlePlayStartFailure(newAudio, newAudio.error);
         };
         return;
       }
-
-      setActivePadId(padId);
-      setAllPads((prev) =>
-        prev.map((p) => (p.id === padId ? { ...p, status: "playing" } : p)),
-      );
-
-      clearProgressInterval();
-      progressIntervalRef.current = setInterval(() => {
-        updatePadProgress(padId, audio.currentTime, audio.duration);
-      }, 250);
 
       audio.onended = () => {
         if (deletedPadIdsRef.current.has(padId)) return;
@@ -624,9 +815,24 @@ export function useAudioPads() {
       };
 
       if (audio.ended) audio.currentTime = 0;
-      await audio.play().catch(console.error);
+      try {
+        await audio.play();
+      } catch (error) {
+        console.error("Failed to play existing audio:", error);
+        await handlePlayStartFailure(audio, error);
+        return;
+      }
       if (requestId !== playRequestRef.current) return;
       decodeRetryRef.current.delete(padId);
+      setActivePadId(padId);
+      setAllPads((prev) =>
+        prev.map((p) =>
+          p.id === padId
+            ? { ...p, status: "playing", errorMessage: undefined }
+            : p,
+        ),
+      );
+      startProgressTracking(audio);
       const targetVolume = Math.min(
         1,
         playbackVolume * (settings.normalizeVolume ? normalizationGain : 1),
@@ -634,36 +840,7 @@ export function useAudioPads() {
       await fadeIn(padId, targetVolume, settings.fadeDuration);
 
       if (settings.normalizeVolume && !pad.normalized) {
-        void normalizeVolumeFromUrl(pad.audioUrl)
-          .then((gain) => {
-            if (deletedPadIdsRef.current.has(padId)) return;
-            setAllPads((prev) =>
-              prev.map((p) =>
-                p.id === padId
-                  ? { ...p, normalized: true, normalizationGain: gain }
-                  : p,
-              ),
-            );
-            const liveGainNode = gainNodesRef.current.get(padId);
-            const livePad = allPadsRef.current.find((p) => p.id === padId);
-            if (!liveGainNode || !livePad || livePad.status !== "playing")
-              return;
-            const nextGain = Math.min(
-              1,
-              (livePad.volume ?? settings.defaultVolume) * gain,
-            );
-            const ctx = getAudioContext();
-            const now = ctx.currentTime;
-            liveGainNode.gain.cancelScheduledValues(now);
-            liveGainNode.gain.setValueAtTime(liveGainNode.gain.value, now);
-            liveGainNode.gain.linearRampToValueAtTime(
-              isMuted ? 0 : nextGain,
-              now + 0.14,
-            );
-          })
-          .catch((error) => {
-            console.error("Background normalization failed:", error);
-          });
+        scheduleNormalization(padId, pad.audioUrl);
       }
     },
     [
@@ -675,7 +852,7 @@ export function useAudioPads() {
       clearProgressInterval,
       fadeIn,
       fadeOut,
-      normalizeVolumeFromUrl,
+      scheduleNormalization,
       updatePadProgress,
     ],
   );
@@ -723,6 +900,38 @@ export function useAudioPads() {
       );
     },
     [settings.fadeDuration, clearProgressInterval, fadeOut],
+  );
+
+  const fadeOutStopPad = useCallback(
+    async (padId: string) => {
+      playRequestRef.current += 1;
+      const audio = audioElementsRef.current.get(padId);
+      const gainNode = gainNodesRef.current.get(padId);
+      if (!audio || !gainNode) {
+        setAllPads((prev) =>
+          prev.map((p) =>
+            p.id === padId ? { ...p, status: "ready", currentTime: 0 } : p,
+          ),
+        );
+        return;
+      }
+
+      if (!audio.paused) {
+        await fadeOut(padId, settings.fadeDuration);
+      } else {
+        gainNode.gain.value = 0;
+      }
+      audio.pause();
+      audio.currentTime = 0;
+      setActivePadId((current) => (current === padId ? null : current));
+      clearProgressInterval();
+      setAllPads((prev) =>
+        prev.map((p) =>
+          p.id === padId ? { ...p, status: "ready", currentTime: 0 } : p,
+        ),
+      );
+    },
+    [settings.fadeDuration, fadeOut, clearProgressInterval],
   );
 
   const stopAllPads = useCallback(async () => {
@@ -775,6 +984,8 @@ export function useAudioPads() {
           persistedLocally = true;
         } catch (e) {
           console.error("Failed to save audio file to IndexedDB:", e);
+          URL.revokeObjectURL(finalUrl);
+          throw new Error("Failed to persist audio file");
         }
       }
 
@@ -788,7 +999,7 @@ export function useAudioPads() {
         volume: settings.defaultVolume,
         normalized: false,
         normalizationGain: 1,
-        status: "loading",
+        status: "ready",
         currentTime: 0,
         duration: 0,
         fileExtension: fileBlob
@@ -798,80 +1009,19 @@ export function useAudioPads() {
 
       deletedPadIdsRef.current.delete(newPad.id);
       setAllPads((prev) => [...prev, newPad]);
-
-      const audio = new Audio(finalUrl);
-      audio.crossOrigin = "anonymous";
-      audio.preload = "auto";
-      preloadAudioElementsRef.current.set(newPad.id, audio);
-
-      audio.onloadeddata = () => {
-        if (deletedPadIdsRef.current.has(newPad.id)) return;
-        setAllPads((prev) =>
-          prev.map((p) =>
-            p.id === newPad.id
-              ? {
-                  ...p,
-                  status: "ready",
-                  duration: audio.duration || 0,
-                  currentTime: 0,
-                }
-              : p,
-          ),
-        );
-      };
-
-      audio.onloadedmetadata = () => {
-        if (deletedPadIdsRef.current.has(newPad.id)) return;
-        setAllPads((prev) =>
-          prev.map((p) =>
-            p.id === newPad.id
-              ? {
-                  ...p,
-                  status: "ready",
-                  duration: audio.duration || p.duration || 0,
-                  currentTime: 0,
-                }
-              : p,
-          ),
-        );
-        updatePadProgress(newPad.id, 0, audio.duration || 0);
-        cleanupPreloadAudio(newPad.id);
-      };
-
-      audio.onended = () => {
-        if (deletedPadIdsRef.current.has(newPad.id)) return;
-        clearProgressInterval();
-        setAllPads((prev) =>
-          prev.map((p) =>
-            p.id === newPad.id ? { ...p, status: "ready", currentTime: 0 } : p,
-          ),
-        );
-        setActivePadId(null);
-      };
-
-      audio.onerror = () => {
-        if (deletedPadIdsRef.current.has(newPad.id)) return;
-        cleanupPreloadAudio(newPad.id);
-        setAllPads((prev) =>
-          prev.map((p) =>
-            p.id === newPad.id
-              ? {
-                  ...p,
-                  status: "error",
-                  errorMessage: GENERIC_AUDIO_LOAD_ERROR,
-                }
-              : p,
-          ),
-        );
-      };
+      if (newPad.audioUrl) {
+        enqueueMetadataProbe(newPad.id, newPad.audioUrl);
+      }
+      if (settings.normalizeVolume && newPad.audioUrl) {
+        scheduleNormalization(newPad.id, newPad.audioUrl);
+      }
     },
     [
       activeBankId,
       settings.defaultVolume,
       settings.normalizeVolume,
-      clearProgressInterval,
-      cleanupPreloadAudio,
-      updatePadProgress,
+      enqueueMetadataProbe,
+      scheduleNormalization,
     ],
   );
 
@@ -879,10 +1029,20 @@ export function useAudioPads() {
     (padId: string) => {
       playRequestRef.current += 1;
       deletedPadIdsRef.current.add(padId);
+      decodeRetryRef.current.delete(padId);
+      const pendingTimer = normalizationTimersRef.current.get(padId);
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        normalizationTimersRef.current.delete(padId);
+      }
+      normalizationInProgressRef.current.delete(padId);
+      metadataQueueRef.current = metadataQueueRef.current.filter(
+        (item) => item.padId !== padId,
+      );
+      syncMetadataQueueState();
       const audio = audioElementsRef.current.get(padId);
       const gainNode = gainNodesRef.current.get(padId);
       if (audio && gainNode) {
-        decodeRetryRef.current.delete(padId);
         audio.onloadeddata = null;
         audio.onerror = null;
         audio.onended = null;
@@ -953,6 +1113,12 @@ export function useAudioPads() {
     playRequestRef.current += 1;
     allPadsRef.current.forEach((pad) => deletedPadIdsRef.current.add(pad.id));
     decodeRetryRef.current.clear();
+    normalizationInProgressRef.current.clear();
+    normalizationTimersRef.current.forEach((timerId) => clearTimeout(timerId));
+    normalizationTimersRef.current.clear();
+    metadataQueueRef.current = [];
+    metadataWorkerRef.current = false;
+    syncMetadataQueueState();
     void stopAllPads();
     audioElementsRef.current.forEach((audio) => {
       audio.onloadeddata = null;
@@ -1165,6 +1331,14 @@ export function useAudioPads() {
       Array.from(preloadAudioElementsRef.current.keys()).forEach((padId) => {
         cleanupPreloadAudio(padId);
       });
+      normalizationInProgressRef.current.clear();
+      normalizationTimersRef.current.forEach((timerId) =>
+        clearTimeout(timerId),
+      );
+      normalizationTimersRef.current.clear();
+      metadataQueueRef.current = [];
+      metadataWorkerRef.current = false;
+      syncMetadataQueueState();
       cleanupQueueRef.current = [];
       cleanupScheduledRef.current = false;
       gainNodesRef.current.clear();
@@ -1179,7 +1353,7 @@ export function useAudioPads() {
       clearProgressInterval();
       if (persistTimeoutRef.current) clearTimeout(persistTimeoutRef.current);
     };
-  }, [clearProgressInterval, cleanupPreloadAudio]);
+  }, [clearProgressInterval, cleanupPreloadAudio, syncMetadataQueueState]);
 
   return {
     pads,
@@ -1190,6 +1364,8 @@ export function useAudioPads() {
     settings,
     activePadId,
     isMuted,
+    metadataQueuePending,
+    metadataQueueProcessing,
     addPad,
     removePad,
     updatePadName,
@@ -1198,6 +1374,7 @@ export function useAudioPads() {
     playPad,
     pausePad,
     stopPad,
+    fadeOutStopPad,
     stopAllPads,
     fadeIn,
     fadeOut,

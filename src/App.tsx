@@ -67,6 +67,8 @@ function App() {
     settings,
     activePadId,
     isMuted,
+    metadataQueuePending,
+    metadataQueueProcessing,
     addPad,
     removePad,
     updatePadName,
@@ -75,6 +77,7 @@ function App() {
     playPad,
     pausePad,
     stopPad,
+    fadeOutStopPad,
     stopAllPads,
     toggleMute,
     updateSettings,
@@ -117,6 +120,7 @@ function App() {
     }
   });
   const [uploadFeedback, setUploadFeedback] = useState<string[]>([]);
+  const [analysisTotal, setAnalysisTotal] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const currentPalette = PAD_PALETTES[paletteIndex];
@@ -129,6 +133,12 @@ function App() {
       console.error("Failed to save palette index:", e);
     }
   }, [paletteIndex]);
+
+  useEffect(() => {
+    if (!metadataQueueProcessing && metadataQueuePending === 0) {
+      setAnalysisTotal(0);
+    }
+  }, [metadataQueuePending, metadataQueueProcessing]);
 
   useEffect(() => {
     setBankRenameName(activeBank?.name ?? "");
@@ -196,6 +206,7 @@ function App() {
         try {
           await addPad(name, true, file);
           addedCount += 1;
+          setAnalysisTotal((prev) => prev + 1);
           await new Promise((resolve) => setTimeout(resolve, 50));
         } catch (err) {
           console.error("addPad failed:", err);
@@ -228,9 +239,9 @@ function App() {
 
   const handleFadeOut = useCallback(
     (padId: string) => {
-      pausePad(padId);
+      fadeOutStopPad(padId);
     },
-    [pausePad],
+    [fadeOutStopPad],
   );
 
   const handleVolumeChange = useCallback(
@@ -380,6 +391,10 @@ function App() {
     }),
     [t, i18n.language],
   );
+  const inAnalysisCount =
+    metadataQueuePending + (metadataQueueProcessing ? 1 : 0);
+  const showAnalysis = analysisTotal > 0 && inAnalysisCount > 0;
+  const analysisDone = Math.max(0, analysisTotal - inAnalysisCount);
 
   return (
     <div className="app">
@@ -480,6 +495,17 @@ function App() {
       {/* ── Main Content ── */}
       <main className="main-content">
         <div className="pads-container">
+          {showAnalysis && (
+            <div className="analysis-banner" role="status" aria-live="polite">
+              <svg width="14" height="14" fill="currentColor">
+                <use href="#icon-settings" />
+              </svg>
+              {t("pads.analyzingFiles", {
+                done: analysisDone,
+                total: analysisTotal,
+              })}
+            </div>
+          )}
           <AnimatePresence mode="wait">
             {pads.length === 0 ? (
               <motion.div
@@ -837,10 +863,7 @@ function App() {
                   </div>
 
                   <div className="setting-item">
-                    <span
-                      className="setting-label"
-                      style={{ color: "var(--sp-red)", opacity: 0.8 }}
-                    >
+                    <span className="setting-label" style={{ opacity: 0.82 }}>
                       {t("banks.deleteHint")}
                     </span>
                     <button
@@ -859,10 +882,7 @@ function App() {
                     {t("settings.general")}
                   </div>
                   <div className="setting-item" style={{ marginTop: 4 }}>
-                    <span
-                      className="setting-label"
-                      style={{ color: "var(--sp-red)", opacity: 0.8 }}
-                    >
+                    <span className="setting-label" style={{ opacity: 0.82 }}>
                       {t("controls.resetHint")}
                     </span>
                     <button
@@ -1075,7 +1095,7 @@ function WaveformDots({ active }: { active?: boolean }) {
           style={{
             width: 3,
             borderRadius: 2,
-            background: "var(--sp-green)",
+            background: "currentColor",
             minHeight: 4,
             animationDelay: active ? `${i * 0.15}s` : undefined,
             animationDuration: active ? "0.7s" : undefined,
@@ -1183,6 +1203,48 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function hexToRgb(hexColor: string): { r: number; g: number; b: number } {
+  const hex = hexColor.replace("#", "");
+  const normalized =
+    hex.length === 3
+      ? hex
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : hex;
+  const value = Number.parseInt(normalized, 16);
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+}
+
+function getRelativeLuminance(hexColor: string): number {
+  const { r, g, b } = hexToRgb(hexColor);
+  const normalize = (v: number) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  const rr = normalize(r);
+  const gg = normalize(g);
+  const bb = normalize(b);
+  return 0.2126 * rr + 0.7152 * gg + 0.0722 * bb;
+}
+
+function getContrastRatio(bgHex: string, fgHex: string): number {
+  const l1 = getRelativeLuminance(bgHex);
+  const l2 = getRelativeLuminance(fgHex);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function hexToRgba(hexColor: string, alpha: number): string {
+  const { r, g, b } = hexToRgb(hexColor);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 const PadCard = memo(function PadCard({
   pad,
   isActive,
@@ -1202,11 +1264,105 @@ const PadCard = memo(function PadCard({
   onVolumeChange,
   isDragging = false,
 }: PadCardProps) {
+  const darkForeground = "#080d1a";
+  const lightForeground = "#ffffff";
+  const useDarkForeground =
+    getContrastRatio(color, darkForeground) >=
+    getContrastRatio(color, lightForeground);
   const bg = isActive
-    ? `linear-gradient(135deg, ${color}dd, ${color}99)`
-    : "linear-gradient(135deg, rgba(28,28,46,0.95), rgba(20,20,34,0.98))";
+    ? `linear-gradient(135deg, ${color}f0, ${color}b0)`
+    : `linear-gradient(135deg, ${color}36, rgba(20,20,34,0.96))`;
 
-  const borderColor = isActive ? `${color}66` : "rgba(255,255,255,0.07)";
+  const borderColor = isActive ? `${color}88` : `${color}52`;
+  const textColor = isActive
+    ? useDarkForeground
+      ? "rgba(8,13,26,0.96)"
+      : "rgba(255,255,255,0.96)"
+    : "rgba(255,255,255,0.92)";
+  const mutedTextColor = isActive
+    ? useDarkForeground
+      ? "rgba(8,13,26,0.78)"
+      : "rgba(255,255,255,0.78)"
+    : "rgba(255,255,255,0.72)";
+  const controlBg = isActive
+    ? useDarkForeground
+      ? "rgba(8,13,26,0.16)"
+      : "rgba(255,255,255,0.16)"
+    : "rgba(255,255,255,0.1)";
+  const controlHoverBg = isActive
+    ? useDarkForeground
+      ? "rgba(8,13,26,0.26)"
+      : "rgba(255,255,255,0.24)"
+    : "rgba(255,255,255,0.22)";
+  const playBg = isActive
+    ? useDarkForeground
+      ? "#111827"
+      : "#ffffff"
+    : "rgba(255,255,255,0.92)";
+  const playFg = isActive
+    ? useDarkForeground
+      ? "#f9fafb"
+      : "#111827"
+    : "#111";
+  const progressTrackBg = isActive
+    ? useDarkForeground
+      ? "rgba(8,13,26,0.28)"
+      : "rgba(255,255,255,0.24)"
+    : "rgba(255,255,255,0.15)";
+  const progressFillColor = isActive
+    ? useDarkForeground
+      ? "rgba(8,13,26,0.86)"
+      : "rgba(255,255,255,0.88)"
+    : color;
+  const statusAccents = {
+    playing: "#22d3a0",
+    paused: "#fbbf24",
+    loading: "#60a5fa",
+    error: "#f87171",
+    ready: isActive ? (useDarkForeground ? "#0f172a" : "#f8fafc") : "#cbd5e1",
+  };
+  const statusChip = {
+    playing: {
+      bg: hexToRgba(statusAccents.playing, isActive ? 0.28 : 0.16),
+      fg:
+        getContrastRatio(statusAccents.playing, darkForeground) >=
+        getContrastRatio(statusAccents.playing, lightForeground)
+          ? "rgba(8,13,26,0.96)"
+          : "rgba(255,255,255,0.96)",
+    },
+    paused: {
+      bg: hexToRgba(statusAccents.paused, isActive ? 0.26 : 0.14),
+      fg:
+        getContrastRatio(statusAccents.paused, darkForeground) >=
+        getContrastRatio(statusAccents.paused, lightForeground)
+          ? "rgba(8,13,26,0.96)"
+          : "rgba(255,255,255,0.96)",
+    },
+    loading: {
+      bg: hexToRgba(statusAccents.loading, isActive ? 0.26 : 0.14),
+      fg:
+        getContrastRatio(statusAccents.loading, darkForeground) >=
+        getContrastRatio(statusAccents.loading, lightForeground)
+          ? "rgba(8,13,26,0.96)"
+          : "rgba(255,255,255,0.96)",
+    },
+    error: {
+      bg: hexToRgba(statusAccents.error, isActive ? 0.26 : 0.14),
+      fg:
+        getContrastRatio(statusAccents.error, darkForeground) >=
+        getContrastRatio(statusAccents.error, lightForeground)
+          ? "rgba(8,13,26,0.96)"
+          : "rgba(255,255,255,0.96)",
+    },
+    ready: {
+      bg: isActive
+        ? useDarkForeground
+          ? "rgba(8,13,26,0.16)"
+          : "rgba(255,255,255,0.22)"
+        : "rgba(255,255,255,0.12)",
+      fg: mutedTextColor,
+    },
+  };
 
   const statusKey = {
     playing: "playing",
@@ -1225,11 +1381,27 @@ const PadCard = memo(function PadCard({
       transition={{ type: "spring", stiffness: 300, damping: 24 }}
       style={{
         background: bg,
-        color: "rgba(255,255,255,0.9)",
+        color: textColor,
         borderColor,
         boxShadow: isActive
           ? `0 8px 32px rgba(0,0,0,.6), 0 0 24px ${color}44, inset 0 1px 0 rgba(255,255,255,0.1)`
-          : "0 2px 8px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,0.05)",
+          : `0 4px 14px rgba(0,0,0,.45), 0 0 0 1px ${color}26 inset`,
+        ["--pad-muted-text" as any]: mutedTextColor,
+        ["--pad-control-bg" as any]: controlBg,
+        ["--pad-control-hover-bg" as any]: controlHoverBg,
+        ["--pad-play-bg" as any]: playBg,
+        ["--pad-play-fg" as any]: playFg,
+        ["--pad-progress-track-bg" as any]: progressTrackBg,
+        ["--pad-status-playing-bg" as any]: statusChip.playing.bg,
+        ["--pad-status-playing-fg" as any]: statusChip.playing.fg,
+        ["--pad-status-paused-bg" as any]: statusChip.paused.bg,
+        ["--pad-status-paused-fg" as any]: statusChip.paused.fg,
+        ["--pad-status-loading-bg" as any]: statusChip.loading.bg,
+        ["--pad-status-loading-fg" as any]: statusChip.loading.fg,
+        ["--pad-status-error-bg" as any]: statusChip.error.bg,
+        ["--pad-status-error-fg" as any]: statusChip.error.fg,
+        ["--pad-status-ready-bg" as any]: statusChip.ready.bg,
+        ["--pad-status-ready-fg" as any]: statusChip.ready.fg,
       }}
     >
       {/* Status dot */}
@@ -1238,14 +1410,24 @@ const PadCard = memo(function PadCard({
         style={{
           background:
             pad.status === "playing"
-              ? "var(--sp-green)"
+              ? statusAccents.playing
               : pad.status === "paused"
-                ? "var(--sp-yellow)"
+                ? statusAccents.paused
                 : pad.status === "loading"
-                  ? "var(--sp-blue)"
+                  ? statusAccents.loading
                   : pad.status === "error"
-                    ? "var(--sp-red)"
+                    ? statusAccents.error
                     : "transparent",
+          boxShadow:
+            pad.status === "ready" || pad.status === "idle"
+              ? "none"
+              : `0 0 0 2px ${
+                  isActive
+                    ? useDarkForeground
+                      ? "rgba(255,255,255,0.55)"
+                      : "rgba(8,13,26,0.65)"
+                    : "rgba(8,13,26,0.65)"
+                }`,
         }}
       />
 
@@ -1371,7 +1553,7 @@ const PadCard = memo(function PadCard({
           step="0.02"
           value={pad.volume}
           onChange={(e) => onVolumeChange(pad.id, parseFloat(e.target.value))}
-          style={{ accentColor: isActive ? "#fff" : color }}
+          style={{ accentColor: isActive ? progressFillColor : color }}
         />
         <span className="pad-volume-value">
           {Math.round(pad.volume * 100)}%
@@ -1386,7 +1568,7 @@ const PadCard = memo(function PadCard({
               className="pad-progress-fill"
               style={{
                 width: `${Math.min(100, ((pad.currentTime || 0) / pad.duration) * 100)}%`,
-                background: isActive ? "rgba(255,255,255,0.8)" : color,
+                background: progressFillColor,
               }}
             />
           </div>

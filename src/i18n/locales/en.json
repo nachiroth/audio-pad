@@ -34,6 +34,7 @@
   "pads.emptyState": "Click 'Add Pad' to load your audio files",
   "pads.dropFiles": "Drop audio files here or click to browse",
   "pads.multipleFiles": "Multiple files supported",
+  "pads.analyzingFiles": "Analyzing audio files: {{done}}/{{total}}",
   "pads.converting": "Converting files...",
   "pads.volume": "Volume",
   "settings.title": "Settings",
