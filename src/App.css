@@ -18,7 +18,7 @@
 
     /* Text */
     --sp-text-primary: rgba(255, 255, 255, 0.95);
-    --sp-text-secondary: rgba(255, 255, 255, 0.55);
+    --sp-text-secondary: rgba(255, 255, 255, 0.7);
     --sp-text-disabled: rgba(255, 255, 255, 0.28);
 
     /* Borders */
@@ -144,6 +144,26 @@ body {
     font-weight: 700;
     letter-spacing: -0.02em;
     color: var(--sp-text-primary);
+}
+
+.top-bank-pill {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #ffffff;
+    background: linear-gradient(
+        135deg,
+        rgba(var(--sp-accent-rgb), 0.45),
+        rgba(var(--sp-accent-rgb), 0.25)
+    );
+    border: 1px solid rgba(var(--sp-accent-rgb), 0.45);
+    border-radius: var(--r-full);
+    padding: 4px 10px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .top-bar-actions {
@@ -456,8 +476,8 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 30px;
-    height: 30px;
+    width: 36px;
+    height: 36px;
     border: none;
     border-radius: var(--r-full);
     background: rgba(255, 255, 255, 0.1);
@@ -471,8 +491,8 @@ body {
 }
 
 .pad-control-btn svg {
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
 }
 
 .pad-control-btn:hover {
@@ -944,6 +964,58 @@ body {
     accent-color: var(--sp-accent);
 }
 
+.bank-select {
+    width: 170px;
+    min-height: 38px;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-color: #111827 !important;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    color: #f9fafb !important;
+    border-radius: var(--r-sm);
+    padding: 7px 10px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    line-height: 1.2;
+    background-image:
+        linear-gradient(45deg, transparent 50%, #f9fafb 50%),
+        linear-gradient(135deg, #f9fafb 50%, transparent 50%);
+    background-position:
+        calc(100% - 15px) calc(50% + 1px),
+        calc(100% - 10px) calc(50% + 1px);
+    background-size:
+        5px 5px,
+        5px 5px;
+    background-repeat: no-repeat;
+    padding-right: 28px;
+}
+
+.bank-select option {
+    background-color: #111827 !important;
+    color: #f9fafb !important;
+}
+
+.bank-actions-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bank-input {
+    width: 140px;
+    background: var(--sp-surface-3);
+    border: 1px solid var(--sp-border-strong);
+    color: var(--sp-text-primary);
+    border-radius: var(--r-sm);
+    padding: 7px 9px;
+    font-size: 0.8rem;
+}
+
+.bank-input::placeholder {
+    color: rgba(255, 255, 255, 0.62);
+}
+
 .setting-item input[type="range"]::-webkit-slider-thumb {
     appearance: none;
     -webkit-appearance: none;
@@ -1244,13 +1316,56 @@ body {
     .top-bar {
         padding: 0 12px;
     }
+
+    .setting-item {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .bank-select,
+    .bank-input {
+        width: 100%;
+        min-height: 42px;
+        font-size: 0.9rem;
+    }
+
+    .bank-actions-inline {
+        width: 100%;
+    }
+
+    .bank-actions-inline .btn {
+        min-height: 42px;
+        padding-inline: 14px;
+    }
 }
 
 /* ─── Focus / Accessibility ──────────────────────────────────────────────────── */
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
     outline: 2px solid var(--sp-accent);
     outline-offset: 2px;
+    box-shadow: 0 0 0 3px rgba(var(--sp-accent-rgb), 0.25);
+}
+
+@media (prefers-contrast: more) {
+    .setting-label,
+    .shortcut-desc,
+    .empty-state p,
+    .drop-zone-subtitle {
+        color: #ffffff;
+    }
+
+    .bank-select,
+    .bank-input {
+        border-color: rgba(255, 255, 255, 0.6);
+    }
+
+    .pad-card {
+        border-color: rgba(255, 255, 255, 0.3);
+    }
 }
 
 /* ─── Reduced Motion ─────────────────────────────────────────────────────────── */

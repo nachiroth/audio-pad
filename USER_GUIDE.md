@@ -25,6 +25,13 @@ Only one pad plays at a time. If **Auto Fade Out on Switch** is enabled, switchi
 - **Delete**: Use the trash button and confirm.
 - **Per-pad volume**: Use the slider on each pad.
 
+## Banks
+
+- Use the **Banks** section in Settings to create independent workspaces.
+- Each bank keeps its own pads and order.
+- Switching banks keeps your data persistent for each show/session.
+- Deleting a bank removes all pads from that bank.
+
 ## Top Bar
 
 - **Language**: Switch between English/Spanish.
@@ -39,6 +46,8 @@ Only one pad plays at a time. If **Auto Fade Out on Switch** is enabled, switchi
 - **Fade Duration**
 - **Auto Fade Out on Switch**
 - **Volume Normalization**
+
+Normalization uses RMS + peak analysis with headroom limiting to reduce loudness jumps while avoiding clipping.
 
 ### Appearance
 - Select one of the built-in color palettes.

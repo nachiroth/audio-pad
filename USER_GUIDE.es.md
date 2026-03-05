@@ -25,6 +25,13 @@ Solo un pad reproduce a la vez. Si **Auto Fade Out al Cambiar** está activo, al
 - **Eliminar**: botón de papelera + confirmación.
 - **Volumen por pad**: slider individual en cada pad.
 
+## Bancos
+
+- Usá la sección **Bancos** en Configuración para crear espacios independientes.
+- Cada banco conserva sus propios pads y su orden.
+- Al cambiar de banco, se mantiene la persistencia de datos por obra/sesión.
+- Eliminar un banco borra todos sus pads.
+
 ## Barra superior
 
 - **Idioma**: cambiar entre inglés/español.
@@ -39,6 +46,8 @@ Solo un pad reproduce a la vez. Si **Auto Fade Out al Cambiar** está activo, al
 - **Duración del Fade**
 - **Auto Fade Out al Cambiar**
 - **Normalización de Volumen**
+
+La normalización usa análisis RMS + pico con límite de headroom para reducir saltos de volumen sin clipping.
 
 ### Apariencia
 - Elegí una de las paletas de color disponibles.

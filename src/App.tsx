@@ -61,6 +61,9 @@ function useAccentSync(primary: string) {
 function App() {
   const {
     pads,
+    banks,
+    activeBank,
+    activeBankId,
     settings,
     activePadId,
     isMuted,
@@ -76,6 +79,10 @@ function App() {
     toggleMute,
     updateSettings,
     resetAllPads,
+    createBank,
+    renameBank,
+    deleteBank,
+    switchBank,
   } = useAudioPads();
 
   const { t, i18n } = useTranslation();
@@ -88,6 +95,11 @@ function App() {
   const [pendingDeletePadId, setPendingDeletePadId] = useState<string | null>(
     null,
   );
+  const [pendingDeleteBankId, setPendingDeleteBankId] = useState<string | null>(
+    null,
+  );
+  const [newBankName, setNewBankName] = useState("");
+  const [bankRenameName, setBankRenameName] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(() => {
     try {
       const saved = localStorage.getItem("audioPadPaletteIndex");
@@ -117,6 +129,10 @@ function App() {
       console.error("Failed to save palette index:", e);
     }
   }, [paletteIndex]);
+
+  useEffect(() => {
+    setBankRenameName(activeBank?.name ?? "");
+  }, [activeBankId, activeBank?.name]);
 
   // DnD sensors
   const sensors = useSensors(
@@ -276,6 +292,22 @@ function App() {
     setShowResetConfirm(false);
   };
 
+  const handleCreateBank = useCallback(() => {
+    const created = createBank(newBankName);
+    if (created) setNewBankName("");
+  }, [createBank, newBankName]);
+
+  const handleRenameBank = useCallback(() => {
+    if (!activeBankId) return;
+    renameBank(activeBankId, bankRenameName);
+  }, [activeBankId, bankRenameName, renameBank]);
+
+  const confirmDeleteBank = useCallback(() => {
+    if (!pendingDeleteBankId) return;
+    deleteBank(pendingDeleteBankId);
+    setPendingDeleteBankId(null);
+  }, [pendingDeleteBankId, deleteBank]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -360,6 +392,7 @@ function App() {
             </svg>
           </div>
           <span className="top-bar-name">Audio Pad</span>
+          <span className="top-bank-pill">{activeBank?.name}</span>
           <AnimatePresence>
             {playingPad && (
               <motion.div
@@ -743,6 +776,83 @@ function App() {
                   </div>
                 </section>
 
+                {/* Banks */}
+                <section className="settings-section">
+                  <div className="settings-section-title">
+                    {t("banks.title")}
+                  </div>
+
+                  <div className="setting-item">
+                    <span className="setting-label">{t("banks.active")}</span>
+                    <select
+                      className="bank-select"
+                      value={activeBankId}
+                      onChange={(e) => switchBank(e.target.value)}
+                      aria-label={t("banks.active")}
+                    >
+                      {banks.map((bank) => (
+                        <option key={bank.id} value={bank.id}>
+                          {bank.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="setting-item">
+                    <span className="setting-label">{t("banks.rename")}</span>
+                    <div className="bank-actions-inline">
+                      <input
+                        className="bank-input"
+                        value={bankRenameName}
+                        onChange={(e) => setBankRenameName(e.target.value)}
+                        placeholder={t("banks.namePlaceholder")}
+                        aria-label={t("banks.rename")}
+                      />
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={handleRenameBank}
+                      >
+                        {t("controls.save")}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="setting-item">
+                    <span className="setting-label">{t("banks.create")}</span>
+                    <div className="bank-actions-inline">
+                      <input
+                        className="bank-input"
+                        value={newBankName}
+                        onChange={(e) => setNewBankName(e.target.value)}
+                        placeholder={t("banks.namePlaceholder")}
+                        aria-label={t("banks.create")}
+                      />
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={handleCreateBank}
+                      >
+                        {t("banks.add")}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="setting-item">
+                    <span
+                      className="setting-label"
+                      style={{ color: "var(--sp-red)", opacity: 0.8 }}
+                    >
+                      {t("banks.deleteHint")}
+                    </span>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => setPendingDeleteBankId(activeBankId)}
+                      disabled={banks.length <= 1}
+                    >
+                      {t("banks.delete")}
+                    </button>
+                  </div>
+                </section>
+
                 {/* General */}
                 <section className="settings-section">
                   <div className="settings-section-title">
@@ -753,7 +863,7 @@ function App() {
                       className="setting-label"
                       style={{ color: "var(--sp-red)", opacity: 0.8 }}
                     >
-                      {t("controls.reset")}
+                      {t("controls.resetHint")}
                     </span>
                     <button
                       className="btn btn-danger btn-sm"
@@ -888,6 +998,58 @@ function App() {
                 <button
                   className="btn btn-danger btn-md"
                   onClick={confirmDeletePad}
+                >
+                  {t("controls.delete")}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Delete Bank Confirm Modal ── */}
+      <AnimatePresence>
+        {pendingDeleteBankId && (
+          <motion.div
+            className="modal-overlay"
+            style={{ zIndex: 1100 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setPendingDeleteBankId(null)}
+          >
+            <motion.div
+              className="modal"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  marginBottom: 16,
+                }}
+              >
+                <svg width="28" height="28" fill="var(--sp-red)">
+                  <use href="#icon-warning" />
+                </svg>
+                <h2 style={{ fontSize: "1.1rem" }}>
+                  {t("banks.confirmDelete")}
+                </h2>
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="btn btn-ghost btn-md"
+                  onClick={() => setPendingDeleteBankId(null)}
+                >
+                  {t("controls.cancel")}
+                </button>
+                <button
+                  className="btn btn-danger btn-md"
+                  onClick={confirmDeleteBank}
                 >
                   {t("controls.delete")}
                 </button>

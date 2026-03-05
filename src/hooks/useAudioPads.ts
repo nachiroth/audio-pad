@@ -1,9 +1,9 @@
 /**
  * useAudioPads - core hook for Audio Pad
- * Web Audio API with fade in/out, volume normalization, and IndexedDB persistence.
+ * Web Audio API with fade in/out, normalization, IndexedDB persistence, and banks.
  */
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { arrayMove } from "@dnd-kit/sortable";
 import {
   saveAudioFile,
@@ -15,6 +15,7 @@ import {
 
 export interface AudioPad {
   id: string;
+  bankId: string;
   name: string;
   audioUrl: string;
   localFile?: boolean;
@@ -29,6 +30,11 @@ export interface AudioPad {
   fileExtension?: string;
 }
 
+export interface AudioBank {
+  id: string;
+  name: string;
+}
+
 export interface AudioSettings {
   defaultVolume: number;
   fadeDuration: number;
@@ -39,6 +45,7 @@ export interface AudioSettings {
 type PersistedAudioPad = Pick<
   AudioPad,
   | "id"
+  | "bankId"
   | "name"
   | "audioUrl"
   | "localFile"
@@ -54,7 +61,7 @@ const MISSING_STORED_FILE_ERROR =
   "Stored audio file is missing. Please re-import this pad.";
 const GENERIC_AUDIO_LOAD_ERROR =
   "The system could not decode this audio stream.";
-
+const DEFAULT_BANK_ID = "default-bank";
 const DEFAULT_SETTINGS: AudioSettings = {
   defaultVolume: 0.8,
   fadeDuration: 1.0,
@@ -62,10 +69,44 @@ const DEFAULT_SETTINGS: AudioSettings = {
   normalizeVolume: true,
 };
 
+const createDefaultBank = (): AudioBank => ({
+  id: DEFAULT_BANK_ID,
+  name: "Default",
+});
+
+const createId = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
 export function useAudioPads() {
-  const [pads, setPads] = useState<AudioPad[]>([]);
-  const padsRef = useRef<AudioPad[]>([]);
+  const [allPads, setAllPads] = useState<AudioPad[]>([]);
+  const allPadsRef = useRef<AudioPad[]>([]);
   const deletedPadIdsRef = useRef<Set<string>>(new Set());
+  const [banks, setBanks] = useState<AudioBank[]>(() => {
+    try {
+      const saved = localStorage.getItem("audioPadBanks");
+      if (!saved) return [createDefaultBank()];
+      const parsed = JSON.parse(saved) as AudioBank[];
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        return [createDefaultBank()];
+      }
+      return parsed.map((b, index) => ({
+        id: b.id || `bank-${index}`,
+        name: (b.name || `Bank ${index + 1}`).trim(),
+      }));
+    } catch {
+      return [createDefaultBank()];
+    }
+  });
+  const [activeBankId, setActiveBankId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem("audioPadActiveBankId");
+      return saved || DEFAULT_BANK_ID;
+    } catch {
+      return DEFAULT_BANK_ID;
+    }
+  });
 
   const [settings, setSettings] = useState<AudioSettings>(() => {
     try {
@@ -85,44 +126,47 @@ export function useAudioPads() {
     async function loadPads() {
       try {
         const saved = localStorage.getItem("audioPads");
-        if (saved) {
-          const parsed = JSON.parse(saved) as PersistedAudioPad[];
-          if (!Array.isArray(parsed)) return;
-          const restoredPads = await Promise.all(
-            parsed.map(async (pad) => {
-              const basePad = {
-                ...pad,
-                status: "ready" as const,
-                currentTime: 0,
-                errorMessage: undefined,
-                normalizationGain: pad.normalizationGain ?? 1,
+        if (!saved) return;
+        const parsed = JSON.parse(saved) as PersistedAudioPad[];
+        if (!Array.isArray(parsed)) return;
+
+        const restoredPads = await Promise.all(
+          parsed.map(async (pad) => {
+            const bankId = pad.bankId || DEFAULT_BANK_ID;
+            const basePad: AudioPad = {
+              ...pad,
+              bankId,
+              status: "ready",
+              currentTime: 0,
+              errorMessage: undefined,
+              normalizationGain: pad.normalizationGain ?? 1,
+            };
+            if (pad.localFile && pad.id) {
+              const url = await createAudioObjectURL(pad.id);
+              if (url) return { ...basePad, audioUrl: url };
+              return {
+                ...basePad,
+                audioUrl: "",
+                status: "error" as const,
+                errorMessage: MISSING_STORED_FILE_ERROR,
               };
-              if (pad.localFile && pad.id) {
-                const url = await createAudioObjectURL(pad.id);
-                if (url) return { ...basePad, audioUrl: url };
-                return {
-                  ...basePad,
-                  audioUrl: "",
-                  status: "error" as const,
-                  errorMessage: MISSING_STORED_FILE_ERROR,
-                };
-              }
-              if (
-                typeof pad.audioUrl === "string" &&
-                pad.audioUrl.startsWith("blob:")
-              ) {
-                return {
-                  ...basePad,
-                  audioUrl: "",
-                  status: "error" as const,
-                  errorMessage: MISSING_STORED_FILE_ERROR,
-                };
-              }
-              return basePad;
-            }),
-          );
-          setPads(restoredPads);
-        }
+            }
+            if (
+              typeof pad.audioUrl === "string" &&
+              pad.audioUrl.startsWith("blob:")
+            ) {
+              return {
+                ...basePad,
+                audioUrl: "",
+                status: "error" as const,
+                errorMessage: MISSING_STORED_FILE_ERROR,
+              };
+            }
+            return basePad;
+          }),
+        );
+
+        setAllPads(restoredPads);
       } catch (e) {
         console.error("Failed to load pads:", e);
       }
@@ -144,6 +188,7 @@ export function useAudioPads() {
   const cleanupQueueRef = useRef<Array<{ padId: string; pad?: AudioPad }>>([]);
   const cleanupScheduledRef = useRef(false);
   const playRequestRef = useRef(0);
+  const decodeRetryRef = useRef<Set<string>>(new Set());
 
   const clearProgressInterval = useCallback(() => {
     if (progressIntervalRef.current) {
@@ -154,7 +199,7 @@ export function useAudioPads() {
 
   const updatePadProgress = useCallback(
     (padId: string, currentTime: number, duration?: number) => {
-      setPads((prev) => {
+      setAllPads((prev) => {
         let changed = false;
         const next = prev.map((p) => {
           if (p.id !== padId) return p;
@@ -218,7 +263,6 @@ export function useAudioPads() {
         });
       }
 
-      // Yield to UI between cleanup tasks.
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
 
@@ -228,7 +272,9 @@ export function useAudioPads() {
   const getAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
       audioContextRef.current = new (
-        window.AudioContext || (window as any).webkitAudioContext
+        window.AudioContext ||
+        (window as Window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext
       )();
     }
     if (audioContextRef.current.state === "suspended") {
@@ -261,29 +307,26 @@ export function useAudioPads() {
     [getAudioContext],
   );
 
-  // Analyze RMS + peak and compute safe gain so tracks play at a closer perceived level.
-  const normalizeVolume = useCallback(
-    async (audioUrl: string): Promise<number> => {
+  const computeNormalizationGainFromBuffer = useCallback(
+    async (arrayBuffer: ArrayBuffer): Promise<number> => {
       try {
-        const response = await fetch(audioUrl);
-        if (!response.ok) return 1;
-        const arrayBuffer = await response.arrayBuffer();
         const ctx = getAudioContext();
         const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
 
         const channelCount = decoded.numberOfChannels;
-        const length = decoded.length;
-        if (channelCount === 0 || length === 0) return 1;
+        if (channelCount === 0 || decoded.length === 0) return 1;
 
         let squareSum = 0;
         let sampleCount = 0;
         let peak = 0;
-
-        // Sample stride keeps analysis fast on long files while remaining stable.
-        const stride = Math.max(1, Math.floor(decoded.sampleRate / 12000));
+        const targetSamples = 180000;
 
         for (let ch = 0; ch < channelCount; ch++) {
           const channelData = decoded.getChannelData(ch);
+          const stride = Math.max(
+            1,
+            Math.floor(channelData.length / targetSamples),
+          );
           for (let i = 0; i < channelData.length; i += stride) {
             const sample = channelData[i];
             const abs = Math.abs(sample);
@@ -309,7 +352,21 @@ export function useAudioPads() {
     [getAudioContext],
   );
 
-  // Fade in
+  const normalizeVolumeFromUrl = useCallback(
+    async (audioUrl: string): Promise<number> => {
+      try {
+        const response = await fetch(audioUrl);
+        if (!response.ok) return 1;
+        const arrayBuffer = await response.arrayBuffer();
+        return computeNormalizationGainFromBuffer(arrayBuffer);
+      } catch (error) {
+        console.error("Failed to normalize audio from URL:", error);
+        return 1;
+      }
+    },
+    [computeNormalizationGainFromBuffer],
+  );
+
   const fadeIn = useCallback(
     async (
       padId: string,
@@ -320,18 +377,18 @@ export function useAudioPads() {
       if (!gainNode) return;
       const ctx = getAudioContext();
       const now = ctx.currentTime;
+      const safeDuration = Math.max(0.02, duration);
       gainNode.gain.cancelScheduledValues(now);
       gainNode.gain.setValueAtTime(gainNode.gain.value, now);
       gainNode.gain.linearRampToValueAtTime(
         isMuted ? 0 : targetVolume,
-        now + duration,
+        now + safeDuration,
       );
-      await new Promise<void>((r) => setTimeout(r, duration * 1000));
+      await new Promise<void>((r) => setTimeout(r, safeDuration * 1000));
     },
     [getAudioContext, settings.fadeDuration, isMuted],
   );
 
-  // Fade out
   const fadeOut = useCallback(
     async (
       padId: string,
@@ -341,23 +398,23 @@ export function useAudioPads() {
       if (!gainNode) return;
       const ctx = getAudioContext();
       const now = ctx.currentTime;
+      const safeDuration = Math.max(0.02, duration);
       gainNode.gain.cancelScheduledValues(now);
       gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-      gainNode.gain.linearRampToValueAtTime(0, now + duration);
-      await new Promise<void>((r) => setTimeout(r, duration * 1000));
+      gainNode.gain.linearRampToValueAtTime(0, now + safeDuration);
+      await new Promise<void>((r) => setTimeout(r, safeDuration * 1000));
     },
     [getAudioContext, settings.fadeDuration],
   );
 
-  // Play pad
   const playPad = useCallback(
     async (padId: string) => {
       const requestId = ++playRequestRef.current;
       if (deletedPadIdsRef.current.has(padId)) return;
-      const pad = pads.find((p) => p.id === padId);
+      const pad = allPadsRef.current.find((p) => p.id === padId);
       if (!pad || pad.status === "error" || pad.status === "loading") return;
       if (!pad.audioUrl) {
-        setPads((prev) =>
+        setAllPads((prev) =>
           prev.map((p) =>
             p.id === padId
               ? {
@@ -370,10 +427,10 @@ export function useAudioPads() {
         );
         return;
       }
+
       const playbackVolume = pad.volume ?? settings.defaultVolume;
       let normalizationGain = pad.normalizationGain ?? 1;
 
-      // Enforce single-audio playback by inspecting real audio elements, not only activePadId.
       const otherPlayingIds = Array.from(audioElementsRef.current.entries())
         .filter(([id, audio]) => id !== padId && !audio.paused)
         .map(([id]) => id);
@@ -399,7 +456,7 @@ export function useAudioPads() {
         });
 
         const otherIdsSet = new Set(otherPlayingIds);
-        setPads((prev) =>
+        setAllPads((prev) =>
           prev.map((p) =>
             otherIdsSet.has(p.id)
               ? { ...p, status: "ready", currentTime: 0 }
@@ -417,25 +474,8 @@ export function useAudioPads() {
         newAudio.onloadeddata = async () => {
           if (requestId !== playRequestRef.current) return;
           if (deletedPadIdsRef.current.has(padId)) return;
-          if (settings.normalizeVolume && !pad.normalized) {
-            normalizationGain = await normalizeVolume(pad.audioUrl);
-            if (requestId !== playRequestRef.current) return;
-            setPads((prev) =>
-              prev.map((p) =>
-                p.id === padId
-                  ? {
-                      ...p,
-                      normalized: true,
-                      normalizationGain,
-                      status: "ready",
-                    }
-                  : p,
-              ),
-            );
-          }
-
           setActivePadId(padId);
-          setPads((prev) =>
+          setAllPads((prev) =>
             prev.map((p) => (p.id === padId ? { ...p, status: "playing" } : p)),
           );
 
@@ -446,17 +486,52 @@ export function useAudioPads() {
 
           await newAudio.play().catch(console.error);
           if (requestId !== playRequestRef.current) return;
+          decodeRetryRef.current.delete(padId);
           const targetVolume = Math.min(
             1,
             playbackVolume * (settings.normalizeVolume ? normalizationGain : 1),
           );
           await fadeIn(padId, targetVolume, settings.fadeDuration);
+
+          if (settings.normalizeVolume && !pad.normalized) {
+            void normalizeVolumeFromUrl(pad.audioUrl)
+              .then((gain) => {
+                if (deletedPadIdsRef.current.has(padId)) return;
+                normalizationGain = gain;
+                setAllPads((prev) =>
+                  prev.map((p) =>
+                    p.id === padId
+                      ? { ...p, normalized: true, normalizationGain: gain }
+                      : p,
+                  ),
+                );
+                const liveGainNode = gainNodesRef.current.get(padId);
+                const livePad = allPadsRef.current.find((p) => p.id === padId);
+                if (!liveGainNode || !livePad || livePad.status !== "playing")
+                  return;
+                const nextGain = Math.min(
+                  1,
+                  (livePad.volume ?? settings.defaultVolume) * gain,
+                );
+                const ctx = getAudioContext();
+                const now = ctx.currentTime;
+                liveGainNode.gain.cancelScheduledValues(now);
+                liveGainNode.gain.setValueAtTime(liveGainNode.gain.value, now);
+                liveGainNode.gain.linearRampToValueAtTime(
+                  isMuted ? 0 : nextGain,
+                  now + 0.14,
+                );
+              })
+              .catch((error) => {
+                console.error("Background normalization failed:", error);
+              });
+          }
         };
 
         newAudio.onended = () => {
           if (deletedPadIdsRef.current.has(padId)) return;
           clearProgressInterval();
-          setPads((prev) =>
+          setAllPads((prev) =>
             prev.map((p) =>
               p.id === padId ? { ...p, status: "ready", currentTime: 0 } : p,
             ),
@@ -466,20 +541,57 @@ export function useAudioPads() {
 
         newAudio.onerror = () => {
           if (deletedPadIdsRef.current.has(padId)) return;
-          let errorMsg = "Failed to load audio file.";
           const code = newAudio.error?.code;
+          const alreadyRetried = decodeRetryRef.current.has(padId);
+
+          if (code === 4 && !alreadyRetried) {
+            decodeRetryRef.current.add(padId);
+            const brokenAudio = audioElementsRef.current.get(padId);
+            if (brokenAudio) {
+              brokenAudio.onloadeddata = null;
+              brokenAudio.onerror = null;
+              brokenAudio.onended = null;
+              brokenAudio.ontimeupdate = null;
+              brokenAudio.pause();
+              brokenAudio.src = "";
+            }
+            audioElementsRef.current.delete(padId);
+            gainNodesRef.current.delete(padId);
+
+            void (async () => {
+              if (pad.localFile) {
+                const refreshedUrl = await createAudioObjectURL(padId);
+                if (refreshedUrl) {
+                  setAllPads((prev) =>
+                    prev.map((p) =>
+                      p.id === padId
+                        ? {
+                            ...p,
+                            audioUrl: refreshedUrl,
+                            status: "ready",
+                            errorMessage: undefined,
+                          }
+                        : p,
+                    ),
+                  );
+                }
+              }
+
+              // Retry once in next tick; if it fails again, user gets real error.
+              window.setTimeout(() => {
+                void playPad(padId);
+              }, 40);
+            })();
+            return;
+          }
+
+          let errorMsg = "Failed to load audio file.";
           if (code === 4) errorMsg = GENERIC_AUDIO_LOAD_ERROR;
           else if (code === 1) errorMsg = "Loading aborted.";
           else if (code === 2) errorMsg = "Network error.";
           else if (code === 3) errorMsg = "File is corrupted or incomplete.";
 
-          console.error(
-            "Audio load error:",
-            newAudio.error?.message,
-            "Pad:",
-            padId,
-          );
-          setPads((prev) =>
+          setAllPads((prev) =>
             prev.map((p) =>
               p.id === padId
                 ? { ...p, status: "error", errorMessage: errorMsg }
@@ -490,9 +602,8 @@ export function useAudioPads() {
         return;
       }
 
-      // Existing audio element — resume
       setActivePadId(padId);
-      setPads((prev) =>
+      setAllPads((prev) =>
         prev.map((p) => (p.id === padId ? { ...p, status: "playing" } : p)),
       );
 
@@ -504,7 +615,7 @@ export function useAudioPads() {
       audio.onended = () => {
         if (deletedPadIdsRef.current.has(padId)) return;
         clearProgressInterval();
-        setPads((prev) =>
+        setAllPads((prev) =>
           prev.map((p) =>
             p.id === padId ? { ...p, status: "ready", currentTime: 0 } : p,
           ),
@@ -515,14 +626,48 @@ export function useAudioPads() {
       if (audio.ended) audio.currentTime = 0;
       await audio.play().catch(console.error);
       if (requestId !== playRequestRef.current) return;
+      decodeRetryRef.current.delete(padId);
       const targetVolume = Math.min(
         1,
         playbackVolume * (settings.normalizeVolume ? normalizationGain : 1),
       );
       await fadeIn(padId, targetVolume, settings.fadeDuration);
+
+      if (settings.normalizeVolume && !pad.normalized) {
+        void normalizeVolumeFromUrl(pad.audioUrl)
+          .then((gain) => {
+            if (deletedPadIdsRef.current.has(padId)) return;
+            setAllPads((prev) =>
+              prev.map((p) =>
+                p.id === padId
+                  ? { ...p, normalized: true, normalizationGain: gain }
+                  : p,
+              ),
+            );
+            const liveGainNode = gainNodesRef.current.get(padId);
+            const livePad = allPadsRef.current.find((p) => p.id === padId);
+            if (!liveGainNode || !livePad || livePad.status !== "playing")
+              return;
+            const nextGain = Math.min(
+              1,
+              (livePad.volume ?? settings.defaultVolume) * gain,
+            );
+            const ctx = getAudioContext();
+            const now = ctx.currentTime;
+            liveGainNode.gain.cancelScheduledValues(now);
+            liveGainNode.gain.setValueAtTime(liveGainNode.gain.value, now);
+            liveGainNode.gain.linearRampToValueAtTime(
+              isMuted ? 0 : nextGain,
+              now + 0.14,
+            );
+          })
+          .catch((error) => {
+            console.error("Background normalization failed:", error);
+          });
+      }
     },
     [
-      pads,
+      settings.defaultVolume,
       settings.autoFadeOut,
       settings.fadeDuration,
       settings.normalizeVolume,
@@ -530,11 +675,11 @@ export function useAudioPads() {
       clearProgressInterval,
       fadeIn,
       fadeOut,
-      normalizeVolume,
+      normalizeVolumeFromUrl,
+      updatePadProgress,
     ],
   );
 
-  // Pause (retains position)
   const pausePad = useCallback(
     async (padId: string) => {
       playRequestRef.current += 1;
@@ -542,18 +687,17 @@ export function useAudioPads() {
       const gainNode = gainNodesRef.current.get(padId);
       if (!audio || !gainNode) return;
 
-      await fadeOut(padId, settings.fadeDuration * 0.3);
+      await fadeOut(padId, Math.min(0.22, settings.fadeDuration * 0.3));
       audio.pause();
 
       clearProgressInterval();
-      setPads((prev) =>
+      setAllPads((prev) =>
         prev.map((p) => (p.id === padId ? { ...p, status: "paused" } : p)),
       );
     },
     [settings.fadeDuration, fadeOut, clearProgressInterval],
   );
 
-  // Stop (resets to beginning)
   const stopPad = useCallback(
     async (padId: string) => {
       playRequestRef.current += 1;
@@ -561,25 +705,43 @@ export function useAudioPads() {
       const gainNode = gainNodesRef.current.get(padId);
       if (!audio || !gainNode) return;
 
-      gainNode.gain.value = 0;
+      if (!audio.paused) {
+        await fadeOut(padId, Math.min(0.18, settings.fadeDuration * 0.25));
+      } else {
+        gainNode.gain.value = 0;
+      }
+
       audio.pause();
       audio.currentTime = 0;
-      setActivePadId(null);
+      setActivePadId((current) => (current === padId ? null : current));
 
       clearProgressInterval();
-      setPads((prev) =>
+      setAllPads((prev) =>
         prev.map((p) =>
           p.id === padId ? { ...p, status: "ready", currentTime: 0 } : p,
         ),
       );
     },
-    [clearProgressInterval],
+    [settings.fadeDuration, clearProgressInterval, fadeOut],
   );
 
-  // Stop all
-  const stopAllPads = useCallback(() => {
+  const stopAllPads = useCallback(async () => {
     playRequestRef.current += 1;
-    pads.forEach((pad) => {
+    const playingIds = Array.from(audioElementsRef.current.entries())
+      .filter(([, audio]) => !audio.paused)
+      .map(([id]) => id);
+
+    if (playingIds.length > 0) {
+      await Promise.all(
+        playingIds.map((id) =>
+          fadeOut(id, Math.min(0.14, settings.fadeDuration * 0.2)).catch(
+            console.error,
+          ),
+        ),
+      );
+    }
+
+    allPadsRef.current.forEach((pad) => {
       const audio = audioElementsRef.current.get(pad.id);
       const gainNode = gainNodesRef.current.get(pad.id);
       if (audio && gainNode) {
@@ -590,23 +752,19 @@ export function useAudioPads() {
     });
 
     clearProgressInterval();
-    setPads((prev) =>
+    setAllPads((prev) =>
       prev.map((p) => ({ ...p, status: "ready", currentTime: 0 })),
     );
     setActivePadId(null);
-  }, [pads, clearProgressInterval]);
+  }, [fadeOut, settings.fadeDuration, clearProgressInterval]);
 
-  // Add pad
   const addPad = useCallback(
     async (
       name: string,
       localFile: boolean = false,
       fileBlob?: Blob,
     ): Promise<void> => {
-      const padId =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const padId = createId();
       let finalUrl = "";
       let persistedLocally = false;
 
@@ -622,6 +780,7 @@ export function useAudioPads() {
 
       const newPad: AudioPad = {
         id: padId,
+        bankId: activeBankId,
         name,
         audioUrl: finalUrl,
         localFile: persistedLocally,
@@ -633,12 +792,12 @@ export function useAudioPads() {
         currentTime: 0,
         duration: 0,
         fileExtension: fileBlob
-          ? `.${(fileBlob as any).name?.split(".").pop()?.toLowerCase() || "unknown"}`
+          ? `.${(fileBlob as File).name?.split(".").pop()?.toLowerCase() || "unknown"}`
           : "unknown",
       };
 
       deletedPadIdsRef.current.delete(newPad.id);
-      setPads((prev) => [...prev, newPad]);
+      setAllPads((prev) => [...prev, newPad]);
 
       const audio = new Audio(finalUrl);
       audio.crossOrigin = "anonymous";
@@ -647,8 +806,7 @@ export function useAudioPads() {
 
       audio.onloadeddata = () => {
         if (deletedPadIdsRef.current.has(newPad.id)) return;
-        cleanupPreloadAudio(newPad.id);
-        setPads((prev) =>
+        setAllPads((prev) =>
           prev.map((p) =>
             p.id === newPad.id
               ? {
@@ -664,13 +822,26 @@ export function useAudioPads() {
 
       audio.onloadedmetadata = () => {
         if (deletedPadIdsRef.current.has(newPad.id)) return;
+        setAllPads((prev) =>
+          prev.map((p) =>
+            p.id === newPad.id
+              ? {
+                  ...p,
+                  status: "ready",
+                  duration: audio.duration || p.duration || 0,
+                  currentTime: 0,
+                }
+              : p,
+          ),
+        );
         updatePadProgress(newPad.id, 0, audio.duration || 0);
+        cleanupPreloadAudio(newPad.id);
       };
 
       audio.onended = () => {
         if (deletedPadIdsRef.current.has(newPad.id)) return;
         clearProgressInterval();
-        setPads((prev) =>
+        setAllPads((prev) =>
           prev.map((p) =>
             p.id === newPad.id ? { ...p, status: "ready", currentTime: 0 } : p,
           ),
@@ -681,13 +852,7 @@ export function useAudioPads() {
       audio.onerror = () => {
         if (deletedPadIdsRef.current.has(newPad.id)) return;
         cleanupPreloadAudio(newPad.id);
-        console.error(
-          "Audio load error — Pad:",
-          padId,
-          "Type:",
-          fileBlob?.type,
-        );
-        setPads((prev) =>
+        setAllPads((prev) =>
           prev.map((p) =>
             p.id === newPad.id
               ? {
@@ -701,14 +866,15 @@ export function useAudioPads() {
       };
     },
     [
+      activeBankId,
       settings.defaultVolume,
+      settings.normalizeVolume,
       clearProgressInterval,
       cleanupPreloadAudio,
       updatePadProgress,
     ],
   );
 
-  // Remove pad
   const removePad = useCallback(
     (padId: string) => {
       playRequestRef.current += 1;
@@ -716,6 +882,7 @@ export function useAudioPads() {
       const audio = audioElementsRef.current.get(padId);
       const gainNode = gainNodesRef.current.get(padId);
       if (audio && gainNode) {
+        decodeRetryRef.current.delete(padId);
         audio.onloadeddata = null;
         audio.onerror = null;
         audio.onended = null;
@@ -729,30 +896,29 @@ export function useAudioPads() {
 
       if (activePadId === padId) clearProgressInterval();
 
-      const pad = padsRef.current.find((p) => p.id === padId);
+      const pad = allPadsRef.current.find((p) => p.id === padId);
       if (activePadId === padId) setActivePadId(null);
-      setPads((prev) => prev.filter((p) => p.id !== padId));
+      setAllPads((prev) => prev.filter((p) => p.id !== padId));
 
-      // Queue heavy cleanup away from the click path to keep UI responsive.
       cleanupQueueRef.current.push({ padId, pad });
       void runCleanupQueue();
     },
     [activePadId, clearProgressInterval, runCleanupQueue],
   );
 
-  // Update pad name
   const updatePadName = useCallback((padId: string, name: string) => {
-    setPads((prev) => prev.map((p) => (p.id === padId ? { ...p, name } : p)));
+    setAllPads((prev) =>
+      prev.map((p) => (p.id === padId ? { ...p, name } : p)),
+    );
   }, []);
 
-  // Update pad volume
   const updatePadVolume = useCallback(
     (padId: string, volume: number) => {
-      setPads((prev) =>
+      setAllPads((prev) =>
         prev.map((p) => (p.id === padId ? { ...p, volume } : p)),
       );
       const gainNode = gainNodesRef.current.get(padId);
-      const pad = pads.find((p) => p.id === padId);
+      const pad = allPadsRef.current.find((p) => p.id === padId);
       if (gainNode && pad?.status === "playing") {
         const norm = settings.normalizeVolume
           ? (pad.normalizationGain ?? 1)
@@ -760,15 +926,14 @@ export function useAudioPads() {
         gainNode.gain.value = isMuted ? 0 : Math.min(1, volume * norm);
       }
     },
-    [pads, isMuted, settings.normalizeVolume],
+    [isMuted, settings.normalizeVolume],
   );
 
-  // Toggle mute
   const toggleMute = useCallback(() => {
     const newMuted = !isMuted;
     setIsMuted(newMuted);
     gainNodesRef.current.forEach((gainNode, padId) => {
-      const pad = pads.find((p) => p.id === padId);
+      const pad = allPadsRef.current.find((p) => p.id === padId);
       if (pad?.status === "playing") {
         const norm = settings.normalizeVolume
           ? (pad.normalizationGain ?? 1)
@@ -778,18 +943,17 @@ export function useAudioPads() {
           : Math.min(1, (pad.volume ?? settings.defaultVolume) * norm);
       }
     });
-  }, [isMuted, pads, settings.defaultVolume, settings.normalizeVolume]);
+  }, [isMuted, settings.defaultVolume, settings.normalizeVolume]);
 
-  // Update settings
   const updateSettings = useCallback((newSettings: Partial<AudioSettings>) => {
     setSettings((prev) => ({ ...prev, ...newSettings }));
   }, []);
 
-  // Reset all pads
   const resetAllPads = useCallback(() => {
     playRequestRef.current += 1;
-    padsRef.current.forEach((pad) => deletedPadIdsRef.current.add(pad.id));
-    stopAllPads();
+    allPadsRef.current.forEach((pad) => deletedPadIdsRef.current.add(pad.id));
+    decodeRetryRef.current.clear();
+    void stopAllPads();
     audioElementsRef.current.forEach((audio) => {
       audio.onloadeddata = null;
       audio.onerror = null;
@@ -805,7 +969,7 @@ export function useAudioPads() {
     cleanupQueueRef.current = [];
     cleanupScheduledRef.current = false;
     gainNodesRef.current.clear();
-    padsRef.current.forEach((pad) => {
+    allPadsRef.current.forEach((pad) => {
       if (pad.audioUrl) {
         revokeStoredAudioURL(pad.audioUrl).catch((e) => {
           console.error("Failed to revoke audio URL:", e);
@@ -815,19 +979,120 @@ export function useAudioPads() {
     clearAllAudioFiles().catch((e) => {
       console.error("Failed to clear stored audio files:", e);
     });
-    setPads([]);
+    setAllPads([]);
+    setBanks([createDefaultBank()]);
+    setActiveBankId(DEFAULT_BANK_ID);
     setSettings(DEFAULT_SETTINGS);
     setIsMuted(false);
     setActivePadId(null);
   }, [stopAllPads, cleanupPreloadAudio]);
 
-  // Persist to localStorage
+  const createBank = useCallback(
+    (name: string) => {
+      const bankName = name.trim();
+      if (!bankName) return null;
+      const newBank: AudioBank = { id: createId(), name: bankName };
+      setBanks((prev) => [...prev, newBank]);
+      void stopAllPads();
+      setActiveBankId(newBank.id);
+      return newBank;
+    },
+    [stopAllPads],
+  );
+
+  const renameBank = useCallback((bankId: string, name: string) => {
+    const nextName = name.trim();
+    if (!nextName) return;
+    setBanks((prev) =>
+      prev.map((bank) =>
+        bank.id === bankId ? { ...bank, name: nextName } : bank,
+      ),
+    );
+  }, []);
+
+  const switchBank = useCallback(
+    (bankId: string) => {
+      if (bankId === activeBankId) return;
+      const exists = banks.some((bank) => bank.id === bankId);
+      if (!exists) return;
+      void stopAllPads();
+      setActiveBankId(bankId);
+    },
+    [activeBankId, banks, stopAllPads],
+  );
+
+  const deleteBank = useCallback(
+    (bankId: string) => {
+      if (banks.length <= 1) return false;
+      const exists = banks.some((bank) => bank.id === bankId);
+      if (!exists) return false;
+
+      const fallbackBank = banks.find((bank) => bank.id !== bankId);
+      if (!fallbackBank) return false;
+
+      const padsToRemove = allPadsRef.current.filter(
+        (pad) => pad.bankId === bankId,
+      );
+      void stopAllPads();
+      padsToRemove.forEach((pad) => {
+        deletedPadIdsRef.current.add(pad.id);
+        cleanupQueueRef.current.push({ padId: pad.id, pad });
+      });
+      void runCleanupQueue();
+
+      setAllPads((prev) => prev.filter((pad) => pad.bankId !== bankId));
+      setBanks((prev) => prev.filter((bank) => bank.id !== bankId));
+      setActiveBankId((current) =>
+        current === bankId ? fallbackBank.id : current,
+      );
+      return true;
+    },
+    [banks, stopAllPads, runCleanupQueue],
+  );
+
+  const reorderPads = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      setAllPads((prev) => {
+        const bankPads = prev.filter((p) => p.bankId === activeBankId);
+        if (
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= bankPads.length ||
+          toIndex >= bankPads.length
+        ) {
+          return prev;
+        }
+
+        const movedBankPads = arrayMove(bankPads, fromIndex, toIndex);
+        let cursor = 0;
+        return prev.map((pad) =>
+          pad.bankId === activeBankId ? movedBankPads[cursor++] : pad,
+        );
+      });
+    },
+    [activeBankId],
+  );
+
+  const pads = useMemo(
+    () => allPads.filter((pad) => pad.bankId === activeBankId),
+    [allPads, activeBankId],
+  );
+
+  const activeBank = useMemo(
+    () =>
+      banks.find((bank) => bank.id === activeBankId) ??
+      banks[0] ??
+      createDefaultBank(),
+    [banks, activeBankId],
+  );
+
+  // Persist pads
   useEffect(() => {
     if (persistTimeoutRef.current) clearTimeout(persistTimeoutRef.current);
     persistTimeoutRef.current = window.setTimeout(() => {
-      // Persist only stable metadata. Avoid frequent writes for transient UI state.
-      const persistedPads: PersistedAudioPad[] = pads.map((pad) => ({
+      const persistedPads: PersistedAudioPad[] = allPads.map((pad) => ({
         id: pad.id,
+        bankId: pad.bankId || DEFAULT_BANK_ID,
         name: pad.name,
         audioUrl:
           pad.localFile || pad.audioUrl.startsWith("blob:") ? "" : pad.audioUrl,
@@ -845,11 +1110,17 @@ export function useAudioPads() {
         console.error("Failed to save pads:", e);
       }
     }, 250);
-  }, [pads]);
+  }, [allPads]);
 
   useEffect(() => {
-    padsRef.current = pads;
-  }, [pads]);
+    allPadsRef.current = allPads;
+  }, [allPads]);
+
+  useEffect(() => {
+    if (!banks.some((bank) => bank.id === activeBankId)) {
+      setActiveBankId(banks[0]?.id ?? DEFAULT_BANK_ID);
+    }
+  }, [banks, activeBankId]);
 
   useEffect(() => {
     try {
@@ -860,15 +1131,30 @@ export function useAudioPads() {
   }, [settings]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem("audioPadBanks", JSON.stringify(banks));
+    } catch (e) {
+      console.error("Failed to save banks:", e);
+    }
+  }, [banks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("audioPadActiveBankId", activeBankId);
+    } catch (e) {
+      console.error("Failed to save active bank:", e);
+    }
+  }, [activeBankId]);
+
+  useEffect(() => {
     gainNodesRef.current.forEach((gainNode, padId) => {
-      const pad = padsRef.current.find((p) => p.id === padId);
+      const pad = allPadsRef.current.find((p) => p.id === padId);
       if (!pad || pad.status !== "playing") return;
       const norm = settings.normalizeVolume ? (pad.normalizationGain ?? 1) : 1;
       gainNode.gain.value = isMuted ? 0 : Math.min(1, pad.volume * norm);
     });
   }, [settings.normalizeVolume, isMuted]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       audioElementsRef.current.forEach((audio) => {
@@ -882,7 +1168,7 @@ export function useAudioPads() {
       cleanupQueueRef.current = [];
       cleanupScheduledRef.current = false;
       gainNodesRef.current.clear();
-      padsRef.current.forEach((pad) => {
+      allPadsRef.current.forEach((pad) => {
         if (pad.audioUrl) {
           revokeStoredAudioURL(pad.audioUrl).catch((e) => {
             console.error("Failed to revoke audio URL:", e);
@@ -895,13 +1181,12 @@ export function useAudioPads() {
     };
   }, [clearProgressInterval, cleanupPreloadAudio]);
 
-  // Reorder (drag and drop)
-  const reorderPads = useCallback((fromIndex: number, toIndex: number) => {
-    setPads((prev) => arrayMove(prev, fromIndex, toIndex));
-  }, []);
-
   return {
     pads,
+    allPads,
+    banks,
+    activeBank,
+    activeBankId,
     settings,
     activePadId,
     isMuted,
@@ -919,5 +1204,9 @@ export function useAudioPads() {
     toggleMute,
     updateSettings,
     resetAllPads,
+    createBank,
+    renameBank,
+    deleteBank,
+    switchBank,
   };
 }

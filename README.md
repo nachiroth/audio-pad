@@ -7,6 +7,7 @@ Built with `Tauri 2 + React + TypeScript + Web Audio API`.
 ## Features
 
 - Multiple audio pads with drag-and-drop sorting
+- Multiple persistent audio banks (e.g. one per show/play)
 - Per-pad volume control
 - Fade in/out transitions
 - Auto fade out when switching pads
