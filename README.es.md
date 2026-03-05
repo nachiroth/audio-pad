@@ -10,6 +10,7 @@ Construido con `Tauri 2 + React + TypeScript + Web Audio API`.
 - Volumen independiente por pad
 - Transiciones de fade in/out
 - Auto fade out al cambiar de pad
+- Normalización de volumen basada en RMS+pico (con límite de headroom)
 - Detener todo, silenciar, pantalla completa y atajos de teclado
 - Interfaz en inglés y español
 - Persistencia local (`IndexedDB` para audio, `localStorage` para metadatos/configuración)
@@ -23,6 +24,7 @@ La app acepta estas extensiones al importar:
 Tamaño máximo: `50MB` por archivo.
 
 Nota: Los audios se cargan tal cual. No hay conversión de formato integrada.
+Si un archivo local previamente guardado no está disponible, el pad queda en error y puede reimportarse.
 
 ## Atajos de teclado
 

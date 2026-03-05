@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { memo, useMemo, useState, useRef, useCallback, useEffect } from "react";
+import type { CSSProperties } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Window } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
@@ -21,6 +22,21 @@ import { CSS } from "@dnd-kit/utilities";
 import { useAudioPads, AudioPad } from "./hooks/useAudioPads";
 import { PAD_PALETTES } from "./theme/m3-theme";
 import "./App.css";
+
+class NonInteractivePointerSensor extends PointerSensor {
+  static activators = [
+    {
+      eventName: "onPointerDown" as const,
+      handler: ({ nativeEvent }: { nativeEvent: PointerEvent }) => {
+        const target = nativeEvent.target as HTMLElement | null;
+        if (!target) return false;
+        return !target.closest(
+          "button, input, textarea, select, [contenteditable='true'], [data-no-dnd='true']",
+        );
+      },
+    },
+  ];
+}
 
 // ─── Accent CSS variable injector ──────────────────────────────────────────────
 function useAccentSync(primary: string) {
@@ -69,15 +85,44 @@ function App() {
   const [editingPadId, setEditingPadId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [pendingDeletePadId, setPendingDeletePadId] = useState<string | null>(
+    null,
+  );
+  const [paletteIndex, setPaletteIndex] = useState(() => {
+    try {
+      const saved = localStorage.getItem("audioPadPaletteIndex");
+      if (!saved) return 0;
+      const parsed = Number(saved);
+      if (
+        !Number.isFinite(parsed) ||
+        parsed < 0 ||
+        parsed >= PAD_PALETTES.length
+      )
+        return 0;
+      return parsed;
+    } catch {
+      return 0;
+    }
+  });
+  const [uploadFeedback, setUploadFeedback] = useState<string[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const currentPalette = PAD_PALETTES[paletteIndex];
   useAccentSync(currentPalette.primary);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem("audioPadPaletteIndex", String(paletteIndex));
+    } catch (e) {
+      console.error("Failed to save palette index:", e);
+    }
+  }, [paletteIndex]);
+
   // DnD sensors
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(NonInteractivePointerSensor, {
+      activationConstraint: { distance: 8 },
+    }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     }),
@@ -100,6 +145,8 @@ function App() {
     async (event: React.ChangeEvent<HTMLInputElement>) => {
       const files = event.target.files;
       if (!files || files.length === 0) return;
+      const errors: string[] = [];
+      let addedCount = 0;
 
       const validExtensions = [
         ".mp3",
@@ -119,26 +166,29 @@ function App() {
         const file = files[i];
 
         if (file.size > 50 * 1024 * 1024) {
-          alert(`${file.name}: ${t("messages.fileTooLarge")}`);
+          errors.push(`${file.name}: ${t("messages.fileTooLarge")}`);
           continue;
         }
 
         const ext = "." + file.name.split(".").pop()?.toLowerCase();
         if (!validExtensions.includes(ext)) {
-          alert(`${file.name}: ${t("messages.unsupportedFormat")}`);
+          errors.push(`${file.name}: ${t("messages.unsupportedFormat")}`);
           continue;
         }
 
         const name = file.name.replace(/\.[^/.]+$/, "");
         try {
           await addPad(name, true, file);
+          addedCount += 1;
           await new Promise((resolve) => setTimeout(resolve, 50));
         } catch (err) {
           console.error("addPad failed:", err);
+          errors.push(`${file.name}: ${t("messages.fileLoadError")}`);
         }
       }
 
-      setShowAddPad(false);
+      setUploadFeedback(errors.slice(0, 5));
+      if (addedCount > 0) setShowAddPad(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
     [addPad, t],
@@ -146,47 +196,52 @@ function App() {
 
   // Play/pause
   const handlePlayPause = useCallback(
-    (pad: AudioPad, event: React.MouseEvent) => {
-      event.stopPropagation();
-      if (pad.status === "playing") pausePad(pad.id);
-      else if (pad.status === "paused" || pad.status === "ready")
-        playPad(pad.id);
+    (padId: string, status: AudioPad["status"]) => {
+      if (status === "playing") pausePad(padId);
+      else if (status === "paused" || status === "ready") playPad(padId);
     },
     [playPad, pausePad],
   );
 
   const handleStop = useCallback(
-    (padId: string, event: React.MouseEvent) => {
-      event.stopPropagation();
+    (padId: string) => {
       stopPad(padId);
     },
     [stopPad],
   );
 
   const handleFadeOut = useCallback(
-    (padId: string, event: React.MouseEvent) => {
-      event.stopPropagation();
+    (padId: string) => {
       pausePad(padId);
     },
     [pausePad],
   );
 
-  const handleDelete = useCallback(
-    (padId: string, event: React.MouseEvent) => {
-      event.stopPropagation();
-      if (confirm(t("messages.confirmDelete"))) removePad(padId);
+  const handleVolumeChange = useCallback(
+    (padId: string, volume: number) => {
+      updatePadVolume(padId, volume);
     },
-    [removePad, t],
+    [updatePadVolume],
   );
 
-  const handleEditStart = useCallback(
-    (pad: AudioPad, event: React.MouseEvent) => {
-      event.stopPropagation();
-      setEditingPadId(pad.id);
-      setEditingName(pad.name);
-    },
-    [],
-  );
+  const handleDelete = useCallback((padId: string) => {
+    setPendingDeletePadId(padId);
+  }, []);
+
+  const confirmDeletePad = useCallback(() => {
+    if (!pendingDeletePadId) return;
+    removePad(pendingDeletePadId);
+    setPendingDeletePadId(null);
+  }, [pendingDeletePadId, removePad]);
+
+  const cancelDeletePad = useCallback(() => {
+    setPendingDeletePadId(null);
+  }, []);
+
+  const handleEditStart = useCallback((padId: string, padName: string) => {
+    setEditingPadId(padId);
+    setEditingName(padName);
+  }, []);
 
   const handleEditSave = useCallback(() => {
     if (editingPadId && editingName.trim())
@@ -270,6 +325,28 @@ function App() {
 
   const playingPad = pads.find(
     (p) => p.id === activePadId && p.status === "playing",
+  );
+  const statusLabels = useMemo(
+    () => ({
+      playing: t("pads.playing"),
+      paused: t("pads.paused"),
+      ready: t("pads.ready"),
+      loading: t("status.loading"),
+      error: t("status.error"),
+    }),
+    [t, i18n.language],
+  );
+  const controlLabels = useMemo(
+    () => ({
+      play: t("controls.play"),
+      pause: t("controls.pause"),
+      stop: t("controls.stop"),
+      fadeOut: t("controls.fadeOut"),
+      rename: t("controls.edit"),
+      delete: t("controls.delete"),
+      volume: t("pads.volume"),
+    }),
+    [t, i18n.language],
   );
 
   return (
@@ -416,19 +493,21 @@ function App() {
                           pad={pad}
                           isActive={activePadId === pad.id}
                           color={padColor}
-                          onPlayPause={(e) => handlePlayPause(pad, e)}
-                          onStop={(e) => handleStop(pad.id, e)}
-                          onDelete={(e) => handleDelete(pad.id, e)}
-                          onEditStart={(e) => handleEditStart(pad, e)}
+                          statusLabels={statusLabels}
+                          controlLabels={controlLabels}
+                          onPlayPause={handlePlayPause}
+                          onStop={handleStop}
+                          onDelete={handleDelete}
+                          onEditStart={handleEditStart}
                           editingName={
                             editingPadId === pad.id ? editingName : pad.name
                           }
                           onEditingNameChange={setEditingName}
                           onEditSave={handleEditSave}
                           onEditCancel={handleEditCancel}
-                          onFadeOut={(e) => handleFadeOut(pad.id, e)}
+                          onFadeOut={handleFadeOut}
                           isEditing={editingPadId === pad.id}
-                          onVolumeChange={(v) => updatePadVolume(pad.id, v)}
+                          onVolumeChange={handleVolumeChange}
                         />
                       );
                     })}
@@ -452,7 +531,10 @@ function App() {
             >
               <button
                 className="fab"
-                onClick={() => setShowAddPad(true)}
+                onClick={() => {
+                  setUploadFeedback([]);
+                  setShowAddPad(true);
+                }}
                 style={{
                   background: currentPalette.primary,
                   color: currentPalette.onPrimary,
@@ -506,6 +588,22 @@ function App() {
                     {t("pads.supportedFormats")} · {t("pads.multipleFiles")}
                   </div>
                 </div>
+                {uploadFeedback.length > 0 && (
+                  <div
+                    className="upload-feedback"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {uploadFeedback.map((msg, index) => (
+                      <div
+                        key={`${msg}-${index}`}
+                        className="upload-feedback-item"
+                      >
+                        {msg}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="modal-actions">
                 <button
@@ -664,7 +762,7 @@ function App() {
                       <svg width="14" height="14" fill="currentColor">
                         <use href="#icon-reset" />
                       </svg>
-                      Reset
+                      {t("controls.reset")}
                     </button>
                   </div>
                 </section>
@@ -746,6 +844,58 @@ function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── Delete Confirm Modal ── */}
+      <AnimatePresence>
+        {pendingDeletePadId && (
+          <motion.div
+            className="modal-overlay"
+            style={{ zIndex: 1100 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={cancelDeletePad}
+          >
+            <motion.div
+              className="modal"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  marginBottom: 16,
+                }}
+              >
+                <svg width="28" height="28" fill="var(--sp-red)">
+                  <use href="#icon-warning" />
+                </svg>
+                <h2 style={{ fontSize: "1.1rem" }}>
+                  {t("messages.confirmDelete")}
+                </h2>
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="btn btn-ghost btn-md"
+                  onClick={cancelDeletePad}
+                >
+                  {t("controls.cancel")}
+                </button>
+                <button
+                  className="btn btn-danger btn-md"
+                  onClick={confirmDeletePad}
+                >
+                  {t("controls.delete")}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -775,7 +925,7 @@ function WaveformDots({ active }: { active?: boolean }) {
 }
 
 // ─── TopButton ─────────────────────────────────────────────────────────────────
-function TopButton({
+const TopButton = memo(function TopButton({
   icon,
   title,
   onClick,
@@ -805,27 +955,37 @@ function TopButton({
       </svg>
     </button>
   );
-}
+});
 
 // ─── Sortable Pad Card ─────────────────────────────────────────────────────────
 interface SortablePadCardProps {
   pad: AudioPad;
   isActive: boolean;
   color: string;
-  onPlayPause: (e: React.MouseEvent) => void;
-  onStop: (e: React.MouseEvent) => void;
-  onDelete: (e: React.MouseEvent) => void;
-  onEditStart: (e: React.MouseEvent) => void;
-  onFadeOut: (e: React.MouseEvent) => void;
+  statusLabels: Record<
+    "playing" | "paused" | "ready" | "loading" | "error",
+    string
+  >;
+  controlLabels: Record<
+    "play" | "pause" | "stop" | "fadeOut" | "rename" | "delete" | "volume",
+    string
+  >;
+  onPlayPause: (padId: string, status: AudioPad["status"]) => void;
+  onStop: (padId: string) => void;
+  onDelete: (padId: string) => void;
+  onEditStart: (padId: string, padName: string) => void;
+  onFadeOut: (padId: string) => void;
   editingName: string;
   onEditingNameChange: (name: string) => void;
   onEditSave: () => void;
   onEditCancel: () => void;
   isEditing: boolean;
-  onVolumeChange: (v: number) => void;
+  onVolumeChange: (padId: string, volume: number) => void;
 }
 
-function SortablePadCard(props: SortablePadCardProps) {
+const SortablePadCard = memo(function SortablePadCard(
+  props: SortablePadCardProps,
+) {
   const {
     attributes,
     listeners,
@@ -835,12 +995,12 @@ function SortablePadCard(props: SortablePadCardProps) {
     isDragging,
   } = useSortable({ id: props.pad.id });
 
-  const style = {
+  const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.3 : 1,
     touchAction: "none",
-    zIndex: isDragging ? 1000 : ("auto" as any),
+    zIndex: isDragging ? 1000 : "auto",
   };
 
   return (
@@ -848,7 +1008,7 @@ function SortablePadCard(props: SortablePadCardProps) {
       <PadCard {...props} isDragging={isDragging} />
     </div>
   );
-}
+});
 
 // ─── Pad Card ──────────────────────────────────────────────────────────────────
 interface PadCardProps extends SortablePadCardProps {
@@ -861,10 +1021,12 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-function PadCard({
+const PadCard = memo(function PadCard({
   pad,
   isActive,
   color,
+  statusLabels,
+  controlLabels,
   onPlayPause,
   onStop,
   onDelete,
@@ -884,14 +1046,14 @@ function PadCard({
 
   const borderColor = isActive ? `${color}66` : "rgba(255,255,255,0.07)";
 
-  const statusText = {
+  const statusKey = {
     playing: "playing",
     paused: "paused",
     ready: "ready",
     loading: "loading",
     error: "error",
     idle: "ready",
-  }[pad.status] as string;
+  }[pad.status] as keyof typeof statusLabels;
 
   return (
     <motion.div
@@ -926,9 +1088,9 @@ function PadCard({
       />
 
       {/* Status pill */}
-      <div className={`pad-status-pill ${statusText}`}>
-        {statusText === "playing" && <WaveformDots active />}
-        {statusText}
+      <div className={`pad-status-pill ${statusKey}`}>
+        {statusKey === "playing" && <WaveformDots active />}
+        {statusLabels[statusKey]}
       </div>
 
       {/* Pad name */}
@@ -947,7 +1109,9 @@ function PadCard({
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span onDoubleClick={onEditStart}>{pad.name}</span>
+          <span onDoubleClick={() => onEditStart(pad.id, pad.name)}>
+            {pad.name}
+          </span>
         )}
       </div>
 
@@ -959,9 +1123,15 @@ function PadCard({
       {/* Controls */}
       <div className="pad-controls">
         <button
+          data-no-dnd="true"
           className="pad-control-btn pad-play-btn"
-          onClick={onPlayPause}
-          title={pad.status === "playing" ? "Pause" : "Play"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onPlayPause(pad.id, pad.status);
+          }}
+          title={
+            pad.status === "playing" ? controlLabels.pause : controlLabels.play
+          }
         >
           <svg width="20" height="20" fill="currentColor">
             <use
@@ -970,48 +1140,52 @@ function PadCard({
           </svg>
         </button>
         <button
+          data-no-dnd="true"
           className="pad-control-btn"
           onClick={(e) => {
             e.stopPropagation();
-            onStop(e);
+            onStop(pad.id);
           }}
-          title="Stop"
+          title={controlLabels.stop}
         >
           <svg width="20" height="20" fill="currentColor">
             <use href="#icon-stop" />
           </svg>
         </button>
         <button
+          data-no-dnd="true"
           className="pad-control-btn"
           onClick={(e) => {
             e.stopPropagation();
-            onFadeOut(e);
+            onFadeOut(pad.id);
           }}
-          title="Fade Out"
+          title={controlLabels.fadeOut}
         >
           <svg width="20" height="20" fill="currentColor">
             <use href="#icon-volume-down" />
           </svg>
         </button>
         <button
+          data-no-dnd="true"
           className="pad-control-btn"
           onClick={(e) => {
             e.stopPropagation();
-            onEditStart(e);
+            onEditStart(pad.id, pad.name);
           }}
-          title="Rename"
+          title={controlLabels.rename}
         >
           <svg width="20" height="20" fill="currentColor">
             <use href="#icon-edit" />
           </svg>
         </button>
         <button
+          data-no-dnd="true"
           className="pad-control-btn"
           onClick={(e) => {
             e.stopPropagation();
-            onDelete(e);
+            onDelete(pad.id);
           }}
-          title="Delete"
+          title={controlLabels.delete}
         >
           <svg width="20" height="20" fill="currentColor">
             <use href="#icon-delete" />
@@ -1020,16 +1194,21 @@ function PadCard({
       </div>
 
       {/* Per-pad volume */}
-      <div className="pad-volume-row" onClick={(e) => e.stopPropagation()}>
-        <span className="pad-volume-label">VOL</span>
+      <div
+        className="pad-volume-row"
+        data-no-dnd="true"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <span className="pad-volume-label">{controlLabels.volume}</span>
         <input
+          data-no-dnd="true"
           type="range"
           className="pad-volume-slider"
           min="0"
           max="1"
           step="0.02"
           value={pad.volume}
-          onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
+          onChange={(e) => onVolumeChange(pad.id, parseFloat(e.target.value))}
           style={{ accentColor: isActive ? "#fff" : color }}
         />
         <span className="pad-volume-value">
@@ -1057,6 +1236,6 @@ function PadCard({
       )}
     </motion.div>
   );
-}
+});
 
 export default App;

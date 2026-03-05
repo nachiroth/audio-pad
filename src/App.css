@@ -270,6 +270,11 @@ body {
     overflow: hidden;
     user-select: none;
     border: 1px solid transparent;
+    will-change: transform;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    contain: layout paint style;
+    isolation: isolate;
 }
 
 .pad-card:active {
@@ -277,8 +282,8 @@ body {
 }
 
 .pad-card:hover {
-    transform: translateY(-3px);
-    box-shadow: var(--shadow-lg);
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.18);
 }
 
 .pad-card.active {
@@ -462,6 +467,7 @@ body {
         background 0.15s,
         transform 0.1s;
     flex-shrink: 0;
+    will-change: transform;
 }
 
 .pad-control-btn svg {
@@ -471,7 +477,7 @@ body {
 
 .pad-control-btn:hover {
     background: rgba(255, 255, 255, 0.22);
-    transform: scale(1.1);
+    transform: scale(1.04);
 }
 
 .pad-control-btn:active {
@@ -493,7 +499,7 @@ body {
 
 .pad-control-btn.pad-play-btn:hover {
     background: #fff;
-    transform: scale(1.08);
+    transform: scale(1.03);
 }
 
 /* Per-pad volume slider */
@@ -509,10 +515,9 @@ body {
 .pad-volume-label {
     font-size: 0.65rem;
     font-weight: 600;
-    text-transform: uppercase;
     letter-spacing: 0.06em;
     opacity: 0.6;
-    width: 22px;
+    width: 52px;
     flex-shrink: 0;
 }
 
@@ -745,6 +750,24 @@ body {
     font-size: 0.8rem;
     color: var(--sp-text-secondary);
     line-height: 1.4;
+}
+
+.upload-feedback {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.upload-feedback-item {
+    font-size: 0.75rem;
+    color: #fecaca;
+    background: rgba(127, 29, 29, 0.28);
+    border: 1px solid rgba(248, 113, 113, 0.35);
+    border-radius: var(--r-sm);
+    padding: 6px 8px;
+    text-align: left;
+    word-break: break-word;
 }
 
 /* Form group */

@@ -6,7 +6,7 @@
 2. Hacé clic en **Agregar Pad** (botón `+` abajo a la derecha).
 3. Seleccioná uno o más archivos de audio.
 
-Extensiones aceptadas: `mp3`, `mpga`, `wav`, `ogg`, `m4a`, `aac`, `webm`, `flac`, `wma`, `opus`  
+Extensiones aceptadas: `mp3`, `mpeg`, `mpga`, `wav`, `ogg`, `m4a`, `aac`, `webm`, `flac`, `wma`, `opus`  
 Tamaño máximo: `50MB` por archivo.
 
 ## Controles de reproducción
@@ -59,6 +59,7 @@ Solo un pad reproduce a la vez. Si **Auto Fade Out al Cambiar** está activo, al
 - Los archivos de audio se guardan en `IndexedDB`.
 - Metadatos y configuración se guardan en `localStorage`.
 - La app funciona offline.
+- Si un archivo local ya no está disponible en almacenamiento, el pad pasa a error y debe volver a importarse.
 
 ## Solución de problemas
 

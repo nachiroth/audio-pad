@@ -6,7 +6,7 @@
 2. Click **Add Pad** (`+` button in the bottom-right).
 3. Select one or more audio files.
 
-Accepted extensions: `mp3`, `mpga`, `wav`, `ogg`, `m4a`, `aac`, `webm`, `flac`, `wma`, `opus`  
+Accepted extensions: `mp3`, `mpeg`, `mpga`, `wav`, `ogg`, `m4a`, `aac`, `webm`, `flac`, `wma`, `opus`  
 Max size: `50MB` per file.
 
 ## Playback Controls
@@ -59,6 +59,7 @@ Only one pad plays at a time. If **Auto Fade Out on Switch** is enabled, switchi
 - Audio files are stored locally in `IndexedDB`.
 - Pad metadata and settings are stored in `localStorage`.
 - The app works offline.
+- If a local file is no longer available in storage, the pad is marked as error and should be re-imported.
 
 ## Troubleshooting
 
